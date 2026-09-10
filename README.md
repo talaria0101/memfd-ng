@@ -76,9 +76,11 @@ no sleeps, no races.
 
 | workload | µs/spawn |
 | --- | --- |
-| `std::process::Command` (control) | ~172 |
-| memfd-ng, payload written per spawn | ~529 |
-| memfd-ng, `prepare()` once, re-spawn | ~273 |
+| `std::process::Command` (control) | ~178 |
+| memfd-ng, payload written per spawn | ~563 |
+| memfd-ng, `prepare()` once, re-spawn | ~283 |
+
+Run-to-run variance is a few percent; the deltas are stable across runs.
 
 Writing the payload costs memory bandwidth; the prepared path halves the
 per-spawn cost. `cargo build --release` size of a minimal driver linking the
@@ -106,7 +108,7 @@ cargo test --features test-hooks    # + forced exec-ladder fallback rungs
 The parity suite runs identical workloads through `std::process::Command`
 and `MemFdExecutable` and asserts identical results — std is the oracle.
 Fixtures are real binaries: a static and a dynamic stub built with the
-system `cc` at test time, plus a hand-assembled 121-byte ELF64 that exits 42.
+system `cc` at test time, plus a hand-assembled 136-byte ELF64 that exits 42.
 
 ## MSRV
 

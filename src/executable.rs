@@ -383,9 +383,14 @@ impl<'a> MemFdExecutable<'a> {
     }
 
     /// Toggle payload sealing. Sealing is on by default; kernels without
-    /// sealing support silently skip it. Takes effect at the next prepare.
+    /// sealing support silently skip it. Changing this invalidates any
+    /// prepared image: the next spawn (or `prepare`) stages a fresh payload
+    /// under the new setting.
     pub fn sealed(&mut self, on: bool) -> &mut Self {
-        self.sealed = on;
+        if self.sealed != on {
+            self.sealed = on;
+            self.prepared = None;
+        }
         self
     }
 

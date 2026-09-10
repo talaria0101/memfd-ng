@@ -95,9 +95,9 @@ impl Child {
 /// A handle to a child process's standard input (stdin).
 pub struct ChildStdin(AnonPipe);
 
-impl std::os::fd::AsRawFd for ChildStdin {
+impl std::os::unix::io::AsRawFd for ChildStdin {
     #[inline]
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.0.as_raw_fd()
     }
 }
@@ -160,9 +160,9 @@ impl Debug for ChildStdin {
 /// A handle to a child process's standard output (stdout).
 pub struct ChildStdout(AnonPipe);
 
-impl std::os::fd::AsRawFd for ChildStdout {
+impl std::os::unix::io::AsRawFd for ChildStdout {
     #[inline]
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.0.as_raw_fd()
     }
 }
@@ -204,9 +204,9 @@ impl Debug for ChildStdout {
 /// A handle to a child process's standard error (stderr).
 pub struct ChildStderr(AnonPipe);
 
-impl std::os::fd::AsRawFd for ChildStderr {
+impl std::os::unix::io::AsRawFd for ChildStderr {
     #[inline]
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.0.as_raw_fd()
     }
 }
