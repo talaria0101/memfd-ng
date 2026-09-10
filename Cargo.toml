@@ -1,0 +1,37 @@
+[package]
+name = "memfd-ng"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.64"
+license = "0BSD"
+description = "Execute ELF binaries straight from memory: memfd-first, with an allocation-free tmpfs ladder when the kernel says no."
+repository = "https://github.com/talaria0101/memfd-ng"
+readme = "README.md"
+keywords = ["memfd", "exec", "fexecve", "memory", "process"]
+categories = ["os::unix-apis"]
+
+[dependencies]
+libc = "0.2.170"
+
+[features]
+# Compiles two env-var hooks (MEMFD_NG_TEST_NO_EXECVEAT / MEMFD_NG_TEST_NO_PROC)
+# that let integration tests force the exec-ladder into its fallback rungs.
+# Off by default; `cargo test --features test-hooks` exercises them.
+test-hooks = []
+
+[dev-dependencies]
+libc = "0.2"
+
+[[bench]]
+name = "spawn"
+harness = false
+
+[profile.release]
+lto = true
+debug = false
+opt-level = "z"
+strip = "symbols"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
