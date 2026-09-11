@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross linker (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests (default features)
+        run: cargo test
+      - name: tests (test-hooks: forced exec-ladder rungs)
+        run: cargo test --features test-hooks
+      - name: tests (cli feature)
+        run: cargo test --features cli
+      - name: FFI tests
+        run: cargo test -p memfd-ng-ffi
+      - name: FFI C smoke (link a real C driver against the cdylib)
+        run: ./scripts/ffi-smoke.sh
+      - name: release build
+        run: cargo build --release --features cli
+      - name: bench (spawn latency, 100 iterations)
+        run: cargo bench -- 100
+
+  cross-compile-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-freebsd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: cargo check
+        run: cargo check --target ${{ matrix.target }}
+      - name: cargo check (test-hooks)
+        run: cargo check --target ${{ matrix.target }} --features test-hooks

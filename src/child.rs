@@ -43,6 +43,22 @@ impl Child {
         self.handle.id()
     }
 
+    /// The pidfd of the child (Linux 5.3+ spawns), if one exists: an fd that
+    /// refers to this child even if its PID is recycled. Event loops can
+    /// poll(2)/epoll it — `POLLIN` fires when the child exits, before it is
+    /// reaped, without any SIGCHLD handling. Reap with [`wait`]/
+    /// [`try_wait`]; the fd stays valid and is closed when this `Child` is
+    /// dropped. `None` on kernels without clone3(CLONE_PIDFD) (the plain
+    /// fork() fallback) and on non-Linux systems.
+    ///
+    /// [`wait`]: Child::wait
+    /// [`try_wait`]: Child::try_wait
+    pub fn pidfd(&self) -> Option<std::os::unix::io::BorrowedFd<'_>> {
+        self.handle
+            .pidfd()
+            .map(|fd| unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) })
+    }
+
     /// Wait for the child process to exit, returning the exit status code.
     pub fn wait(&mut self) -> Result<ExitStatus> {
         drop(self.stdin.take());

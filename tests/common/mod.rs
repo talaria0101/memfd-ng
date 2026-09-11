@@ -28,10 +28,19 @@ fn target_tmpdir() -> PathBuf {
 /// so tests exercise large payloads and non-trivial ELF layouts, not toy
 /// stubs. Returns the binary path.
 fn cc_build(name: &str, code: &str, link_static: bool) -> PathBuf {
-    let src = target_tmpdir().join(format!("{name}.c"));
-    let bin = target_tmpdir().join(name);
+    // Per-process fixture names: test binaries build fixtures in parallel and
+    // a shared path would let one binary exec the other's half-written ELF
+    // (observed live as ENOEXEC under qemu-user; flaky on the host too).
+    let pid = std::process::id();
+    let dir = target_tmpdir();
+    std::fs::create_dir_all(&dir).expect("create fixture tmpdir");
+    let src = dir.join(format!("{name}.{pid}.c"));
+    let bin = dir.join(format!("{name}.{pid}"));
     std::fs::write(&src, code).expect("write fixture source");
-    let mut cmd = Command::new("cc");
+    // MEMFD_NG_TEST_CC lets cross-environments (qemu-user CI) pick the guest
+    // toolchain; fixtures must match the architecture of the test binary.
+    let cc = env::var("MEMFD_NG_TEST_CC").unwrap_or_else(|_| "cc".to_string());
+    let mut cmd = Command::new(cc);
     if link_static {
         cmd.arg("-static");
     }
@@ -53,6 +62,7 @@ const STUB_SRC: &str = r#"
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 /* stub <mode> [args...]
    print   : write argv[2..] space-joined + newline
    exit N  : exit with N
@@ -61,6 +71,8 @@ const STUB_SRC: &str = r#"
    fds     : count entries in /proc/self/fd (procfs systems)
    cat     : copy stdin to stdout, exit 0
    sleep   : sleep 60 (for kill tests)
+   pgroup  : print "pgid=<getpgid(0)> sid=<getsid(0)>"
+   crash   : raise(SIGSEGV) (dies by signal, for 128+signal propagation)
 */
 int main(int argc, char **argv, char **envp) {
     (void)envp;
@@ -96,6 +108,11 @@ int main(int argc, char **argv, char **envp) {
         return 0;
     }
     if (!strcmp(argv[1], "sleep")) { sleep(60); return 0; }
+    if (!strcmp(argv[1], "pgroup")) {
+        printf("pgid=%d sid=%d\n", (int)getpgid(0), (int)getsid(0));
+        return 0;
+    }
+    if (!strcmp(argv[1], "crash")) { raise(SIGSEGV); return 0; }
     return 64;
 }
 "#;
@@ -169,6 +186,19 @@ pub const TINY_ELF_EXIT42: &[u8] = &[
 
 /// The tmpfs ladder's file prefix, for leftover checks.
 pub const FALLBACK_PREFIX: &str = ".memfd-ng-";
+
+/// True when the running kernel is at least `major.minor`; used to skip
+/// pidfd-era assertions on ancient kernels instead of failing them.
+pub fn kernel_at_least(major: u64, minor: u64) -> bool {
+    let info = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut parts = info.split('.');
+    let k_major: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let k_minor: u64 = parts
+        .next()
+        .and_then(|p| p.trim_start_matches("0").parse().ok())
+        .unwrap_or(0);
+    (k_major, k_minor) >= (major, minor)
+}
 
 /// Remove leftovers from earlier runs so cleanliness assertions stay
 /// hermetic no matter what state the machine is in.

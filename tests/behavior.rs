@@ -7,7 +7,9 @@ mod common;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use common::{stub_code, TINY_ELF_EXIT42};
+#[cfg(target_arch = "x86_64")]
+use common::TINY_ELF_EXIT42;
+use common::stub_code;
 use std::os::unix::io::AsRawFd;
 
 use memfd_ng::{MemFdExecutable, Stdio};
@@ -42,6 +44,7 @@ fn payload_fd_not_leaked_into_children() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn tiny_elf_without_libc_exits_42() {
     let _guard = common::serial();
     let st = MemFdExecutable::new("tiny", TINY_ELF_EXIT42).status().unwrap();
@@ -267,4 +270,83 @@ fn static_stub_is_really_static() {
         return;
     }
     panic!("fixture lost its static link: {desc}");
+}
+
+#[test]
+fn unmodified_env_inherits_the_parent_environment() {
+    let _guard = common::serial();
+    // std parity: a command with NO env modifications inherits the parent's
+    // whole environment. Regression: this crate used to hand the exec an
+    // empty environment instead (found in REVIEW-7).
+    std::env::set_var("MEMFD_NG_CANARY", "inherited-whole");
+    let out = MemFdExecutable::new("stub", stub_code())
+        .args(["env", "MEMFD_NG_CANARY"])
+        .stdout(Stdio::MakePipe)
+        .output()
+        .unwrap();
+    std::env::remove_var("MEMFD_NG_CANARY");
+    assert_eq!(out.stdout, b"inherited-whole\n");
+}
+
+#[test]
+fn child_argv0_reaches_the_program() {
+    let _guard = common::serial();
+    // the stub prints nothing about argv0; use sh's builtin to read it
+    let sh_code = std::fs::read("/bin/sh").unwrap();
+    let out = MemFdExecutable::new("sh", &sh_code)
+        .args(["-c", "echo $0"])
+        .stdout(Stdio::MakePipe)
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"sh\n");
+    let mut exe = MemFdExecutable::new("sh", &sh_code);
+    exe.set_program(std::ffi::OsStr::new("my-shell"));
+    let out = exe
+        .args(["-c", "echo $0"])
+        .stdout(Stdio::MakePipe)
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"my-shell\n");
+}
+
+#[test]
+fn prepare_then_spawn_stress() {
+    let _guard = common::serial();
+    // 50 prepared spawns with a growing argv: every spawn must reuse the
+    // sealed image (path stable), keep every earlier argument (argv is
+    // append-only, like std), and stay silent.
+    let mut exe = MemFdExecutable::new("stress-stub", stub_code());
+    exe.arg("print");
+    exe.prepare().unwrap();
+    let path_before = exe.memfd_path().unwrap();
+    for i in 0..50 {
+        let tag = format!("iter-{i}");
+        let out = exe.arg(&tag).stdout(Stdio::MakePipe).output().unwrap();
+        let line = String::from_utf8_lossy(&out.stdout);
+        assert!(line.starts_with("iter-0"), "accumulated argv lost early args at {i}");
+        assert!(line.contains(&tag), "latest arg missing at iteration {i}");
+        assert!(out.status.success(), "iteration {i}");
+        assert_eq!(out.stderr, b"");
+    }
+    assert_eq!(path_before, exe.memfd_path().unwrap(), "image must not be rewritten");
+}
+
+#[test]
+fn interleaved_pipes_and_large_stdout() {
+    let _guard = common::serial();
+    // ~1 MiB through stdout while stderr also drains: exercises read2's
+    // poll loop beyond single-buffer sizes
+    let sh_code = std::fs::read("/bin/sh").unwrap();
+    let out = MemFdExecutable::new("sh-big", &sh_code)
+        .args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=1024 2>/dev/null; echo done >&2",
+        ])
+        .stdout(Stdio::MakePipe)
+        .stderr(Stdio::MakePipe)
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout.len(), 1024 * 1024);
+    assert!(out.stdout.iter().all(|&b| b == 0));
+    assert_eq!(out.stderr, b"done\n");
 }

@@ -1,7 +1,7 @@
-//! Raw syscall layer: memfd creation with a capability ladder, payload
-//! sealing, a three-rung exec ladder, and the CLOEXEC-pipe protocol that
-//! carries the real errno (or a fallback-file path) from the forked child
-//! back to the parent.
+//! Raw syscall layer: memfd creation (ordinary or hugetlb) with a capability
+//! ladder, payload sealing, a three-rung exec ladder, pidfd-based child
+//! handling, and the CLOEXEC-pipe protocol that carries the real errno (or a
+//! fallback-file path) from the forked child back to the parent.
 //!
 //! Everything the child runs between fork and exec is written without
 //! touching the allocator: stack buffers and direct syscalls only, because
@@ -17,6 +17,7 @@ use crate::cvt::{cvt, cvt_r_ssize, cvt_ssize};
 // crate lacks the constants still compile; the values are ABI-stable.
 pub const MFD_CLOEXEC: libc::c_uint = 0x0001;
 pub const MFD_ALLOW_SEALING: libc::c_uint = 0x0002;
+pub const MFD_HUGETLB: libc::c_uint = 0x0004;
 pub const MFD_EXEC: libc::c_uint = 0x0010;
 
 pub const F_ADD_SEALS: libc::c_int = 1033;
@@ -26,6 +27,30 @@ pub const F_SEAL_WRITE: libc::c_int = 0x0008;
 pub const SEALS_FULL: libc::c_int = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
 
 pub const AT_EMPTY_PATH: libc::c_int = 0x1000;
+pub const AT_SYMLINK_FOLLOW: libc::c_int = 0x0400;
+
+// pidfd machinery. Syscall numbers are ABI-stable across every Linux arch;
+// CLONE_* flag values likewise (uapi/linux/sched.h).
+pub const SYS_CLONE3: libc::c_long = 435;
+pub const SYS_PIDFD_SEND_SIGNAL: libc::c_long = 424;
+pub const CLONE_VFORK_FLAG: libc::c_long = 0x0000_4000;
+pub const CLONE_PIDFD_FLAG: libc::c_long = 0x0000_1000;
+
+// magic for hugetlbfs, from uapi/linux/magic.h
+pub const HUGETLBFS_MAGIC: i64 = 0x9584_58f6;
+
+// The parent's (inherited) environment, passed to execve when the command
+// carries no explicit environment changes — exactly what std does. libc does
+// not declare it for Linux, so declare the POSIX global here.
+extern "C" {
+    static mut environ: *mut *mut libc::c_char;
+}
+
+/// Read the global `environ` pointer for execve. Called in the forked child:
+/// the pointer (and the strings it references) are the fork-time copy.
+pub fn inherited_environ() -> *const *const libc::c_char {
+    unsafe { environ as *const *const libc::c_char }
+}
 
 // ---------------------------------------------------------------------------
 // Capability probes
@@ -35,7 +60,22 @@ pub const AT_EMPTY_PATH: libc::c_int = 0x1000;
 // syscall is idempotent and its only side effect is one closed fd.
 static EXEC_BIT: AtomicU8 = AtomicU8::new(0);
 static SEAL_BIT: AtomicU8 = AtomicU8::new(0);
+static HUGETLB_BIT: AtomicU8 = AtomicU8::new(0);
+static CLONE3_BIT: AtomicU8 = AtomicU8::new(0);
+static PIDFD_WAIT_BIT: AtomicU8 = AtomicU8::new(0);
 static PROC_OK: AtomicU8 = AtomicU8::new(0);
+
+/// The cached verdict of a capability probe: the kernel facility is not
+/// available (raw `ENOSYS`, so callers can match on it). Not to be confused
+/// with a per-spawn failure, which keeps its own errno.
+fn unsupported() -> Error {
+    Error::from_raw_os_error(libc::ENOSYS)
+}
+
+/// True when `err` is the cached probe verdict, not a real failure.
+pub fn is_unsupported(err: &Error) -> bool {
+    err.raw_os_error() == Some(libc::ENOSYS)
+}
 
 fn probe_flag(flag: libc::c_uint, atom: &AtomicU8) -> bool {
     match atom.load(Ordering::Relaxed) {
@@ -98,11 +138,49 @@ pub fn memfd_create(name: *const libc::c_char, allow_sealing: bool) -> Result<li
     cvt(unsafe { libc::memfd_create(name, flags) })
 }
 
-/// Seal the memfd against shrinking, growing and writing. Returns false when
-/// the kernel has no sealing support (the payload still runs, it just stays
+/// Create an anonymous executable file on hugetlbfs (`MFD_HUGETLB`, kernel
+/// 4.14+). Probed once; `Err` with raw `ENOSYS` means the kernel refused the
+/// facility outright and the caller should stage an ordinary memfd.
+pub fn memfd_create_hugetlb(name: *const libc::c_char) -> Result<libc::c_int> {
+    if HUGETLB_BIT.load(Ordering::Relaxed) == 2 {
+        return Err(unsupported());
+    }
+    let fd = unsafe { libc::memfd_create(name, MFD_CLOEXEC | MFD_HUGETLB) };
+    if fd >= 0 {
+        HUGETLB_BIT.store(1, Ordering::Relaxed);
+        return Ok(fd);
+    }
+    let err = Error::last_os_error();
+    // ENOSYS/EINVAL: the kernel has no hugetlb memfd support at all.
+    // ENOMEM is deliberately NOT cached: huge pages can be added at runtime.
+    if matches!(
+        err.raw_os_error(),
+        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+    ) {
+        HUGETLB_BIT.store(2, Ordering::Relaxed);
+        return Err(unsupported());
+    }
+    Err(err)
+}
+
+/// The hugetlb page size of a hugetlbfs memfd (`fstatfs(2).f_bsize`), or
+/// `None` when the fd is not on hugetlbfs — the caller's signal to degrade
+/// to an ordinary memfd rather than guess alignment.
+pub fn hugetlb_page_size(fd: libc::c_int) -> Option<i64> {
+    let mut fs: KernelStatfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::syscall(libc::SYS_fstatfs, fd, &mut fs as *mut KernelStatfs) == 0 };
+    if ok && fs.f_type == HUGETLBFS_MAGIC && fs.f_bsize > 0 {
+        Some(fs.f_bsize)
+    } else {
+        None
+    }
+}
+
+/// Seal a memfd against the given `F_SEAL_*` bits. Returns false when the
+/// kernel has no sealing support (the payload still runs, it just stays
 /// modifiable through writable fds).
-pub fn add_seals(fd: libc::c_int) -> bool {
-    unsafe { libc::fcntl(fd, F_ADD_SEALS, SEALS_FULL) == 0 }
+pub fn add_seals(fd: libc::c_int, seals: libc::c_int) -> bool {
+    unsafe { libc::fcntl(fd, F_ADD_SEALS, seals) == 0 }
 }
 
 /// True when `fd` is a regular file — the only kind the kernel will exec.
@@ -138,6 +216,176 @@ fn read_fill(fd: libc::c_int, buf: &mut [u8]) -> Result<usize> {
         filled += n;
     }
     Ok(filled)
+}
+
+// ---------------------------------------------------------------------------
+// pidfd spawn and race-free child handling (Linux)
+// ---------------------------------------------------------------------------
+
+/// `struct clone_args` for the clone3 syscall (uapi/linux/sched.h). The
+/// base 64-byte layout is accepted by every kernel that implements clone3;
+/// later additions (set_tid, cgroup) are appended by the kernel, not us.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct CloneArgs {
+    flags: libc::c_ulonglong,
+    pidfd: *mut libc::c_int,
+    child_tid: libc::c_ulonglong,
+    parent_tid: libc::c_ulonglong,
+    exit_signal: libc::c_ulonglong,
+    stack: libc::c_ulonglong,
+    stack_size: libc::c_ulonglong,
+    tls: libc::c_ulonglong,
+}
+
+/// What `clone3_vfork_pidfd` decided for the caller.
+pub enum ForkOutcome {
+    /// The calling thread continues as the child (pid would be 0).
+    Child,
+    /// The calling thread is the parent; the child has `pid` and the parent
+    /// holds a `pidfd` that stays valid across PID reuse.
+    Parent { pid: libc::pid_t, pidfd: libc::c_int },
+}
+
+/// Fork via `clone3(CLONE_VFORK | CLONE_PIDFD, exit_signal = SIGCHLD)`
+/// (kernel 5.3+).
+///
+/// - `CLONE_VFORK` suspends the parent until the child execs or exits, so
+///   the freshly forked child runs immediately instead of racing the
+///   scheduler — the same latency win posix_spawn buys. Without `CLONE_VM`
+///   the child still gets a private copy-on-write address space, so it can
+///   never corrupt the suspended parent.
+/// - `CLONE_PIDFD` returns a pidfd, which makes `kill`/`wait` immune to PID
+///   reuse and lets callers poll(2) the child.
+///
+/// `Err` with raw `ENOSYS` (cached) means the kernel lacks clone3 or refuses
+/// the flag pair; the caller must fall back to plain `fork()`. Any other
+/// error is the spawn's real verdict and is propagated.
+pub fn clone3_vfork_pidfd() -> Result<ForkOutcome> {
+    if CLONE3_BIT.load(Ordering::Relaxed) == 2 {
+        return Err(unsupported());
+    }
+    let mut pidfd: libc::c_int = -1;
+    let mut args = CloneArgs {
+        flags: (CLONE_VFORK_FLAG | CLONE_PIDFD_FLAG) as libc::c_ulonglong,
+        pidfd: &mut pidfd,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: libc::SIGCHLD as libc::c_ulonglong,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+    };
+    let ret = unsafe {
+        libc::syscall(
+            SYS_CLONE3,
+            &mut args as *mut CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    if ret >= 0 {
+        CLONE3_BIT.store(1, Ordering::Relaxed);
+        return Ok(if ret == 0 {
+            ForkOutcome::Child
+        } else {
+            ForkOutcome::Parent {
+                pid: ret as libc::pid_t,
+                pidfd,
+            }
+        });
+    }
+    let err = Error::last_os_error();
+    if matches!(err.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EINVAL)) {
+        // no clone3 (< 5.3), or a hardening layer that refuses the call:
+        // plain fork() is the ladder's next rung.
+        CLONE3_BIT.store(2, Ordering::Relaxed);
+        return Err(unsupported());
+    }
+    Err(err)
+}
+
+/// Kernel siginfo layout, fixed size (128 bytes on every Linux ABI), used
+/// only to decode what waitid wrote: si_signo @ 0, si_code @ 8, and
+/// _sigchld.si_status @ 24 (identical offset on 32- and 64-bit). A private
+/// copy keeps the decoding independent of libc crate struct gymnastics.
+#[repr(C, align(8))]
+struct RawSiginfo([u8; 128]);
+
+impl RawSiginfo {
+    fn field(&self, off: usize) -> i32 {
+        i32::from_ne_bytes([self.0[off], self.0[off + 1], self.0[off + 2], self.0[off + 3]])
+    }
+}
+
+/// Decode a filled siginfo into the raw wait-status encoding that
+/// `ExitStatus` understands (same encoding waitpid returns).
+fn siginfo_to_wait_status(info: &RawSiginfo) -> i32 {
+    match info.field(8) {
+        libc::CLD_EXITED => (info.field(24) & 0xff) << 8,
+        libc::CLD_KILLED => info.field(24),
+        libc::CLD_DUMPED => info.field(24) | 0x80, // WCOREDUMP
+        _ => 0,
+    }
+}
+
+/// Wait for a child by pidfd (`waitid(P_PIDFD, WEXITED)`), immune to PID
+/// reuse. Returns `Ok(None)` only with `nohang` and a still-running child.
+/// `Err` with raw `ENOSYS` (cached) = kernel without P_PIDFD (< 5.4); the
+/// caller falls back to waitpid on the cached pid.
+pub fn waitid_pidfd(pidfd: libc::c_int, nohang: bool) -> Result<Option<i32>> {
+    if PIDFD_WAIT_BIT.load(Ordering::Relaxed) == 2 {
+        return Err(unsupported());
+    }
+    let mut info = RawSiginfo([0u8; 128]);
+    let mut options = libc::WEXITED;
+    if nohang {
+        options |= libc::WNOHANG;
+    }
+    // The kernel fills a fixed 128-byte siginfo; our RawSiginfo is exactly
+    // that buffer with matching alignment.
+    let ret = unsafe {
+        libc::waitid(
+            libc::P_PIDFD,
+            pidfd as libc::id_t,
+            &mut info as *mut RawSiginfo as *mut libc::siginfo_t,
+            options,
+        )
+    };
+    if ret != 0 {
+        let err = Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) {
+            // idtype P_PIDFD unrecognized = kernel < 5.4. Our options and id
+            // are otherwise always valid, so EINVAL cannot mean anything else
+            // here.
+            PIDFD_WAIT_BIT.store(2, Ordering::Relaxed);
+            return Err(unsupported());
+        }
+        return Err(err);
+    }
+    if info.field(0) == 0 {
+        // WNOHANG and no state change: siginfo was left zeroed.
+        return Ok(None);
+    }
+    Ok(Some(siginfo_to_wait_status(&info)))
+}
+
+/// Deliver SIGKILL by pidfd (`pidfd_send_signal`): hits the exact child even
+/// if its PID was recycled. `Err` with raw `ENOSYS` = kernel < 5.1.
+pub fn pidfd_send_signal_kill(pidfd: libc::c_int) -> Result<()> {
+    let ret = unsafe {
+        libc::syscall(
+            SYS_PIDFD_SEND_SIGNAL,
+            pidfd,
+            libc::SIGKILL,
+            std::ptr::null::<libc::c_void>(),
+            0u32,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,16 +484,24 @@ pub unsafe fn exec_fd(
         if let Some(_len) = proc_fd_path(fd, &mut buf) {
             libc::execve(buf.as_ptr() as *const libc::c_char, argv, envp);
             let err = Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ENOENT) {
+            // ENOENT: procfs vanished mid-ladder. ENOEXEC: under user-mode
+            // emulators (qemu-user) this rung cannot work — the emulator
+            // re-executes itself and the CLOEXEC fd is gone by the time it
+            // re-opens the path. Both are environmental verdicts: the named
+            // rung may still behave differently, so fall through.
+            if !matches!(
+                err.raw_os_error(),
+                Some(libc::ENOENT) | Some(libc::ENOEXEC)
+            ) {
                 return Err(err);
             }
         }
     }
 
-    Err(Error::new(
-        ErrorKind::Unsupported,
-        "no fd-based exec rung succeeded",
-    ))
+    // Both fd rungs declined for environmental reasons. Raw ENOSYS is the
+    // exhaustion marker (never a payload verdict — real ENOEXEC etc. returned
+    // above), allocation-free for the forked child.
+    Err(Error::from_raw_os_error(libc::ENOSYS))
 }
 
 /// Execute a named path in place of the current process.
@@ -385,18 +641,19 @@ pub struct TmpfsPayload {
     /// before this is returned: the kernel refuses exec on a file that is
     /// open for writing (ETXTBSY) unless it is a memfd.
     pub fd: libc::c_int,
-    /// The file's path, kept only when procfs is unavailable and the name is
-    /// therefore the final exec rung. The parent unlinks it after reaping.
+    /// The file's path, kept whenever a name was linked: the fd rungs get
+    /// first try, but user-mode emulators can only exec the named rung.
+    /// Reported to the parent, which unlinks it as soon as the exec outcome
+    /// is known (success EOF, failure errno, or death).
     pub named: Option<NamedPath>,
 }
 
 /// Create and fill a payload file on an executable filesystem.
 ///
-/// With procfs available the write fd is swapped for a read-only one and the
-/// name is unlinked immediately: every exec rung is fd-based, so nothing is
-/// left to clean up. Without procfs the write fd is closed (the kernel's
-/// ETXTBSY rule) and the name is returned for the named rung plus the
-/// parent-side unlink after reap.
+/// With procfs available the write fd is swapped for a read-only one. The
+/// name (when one was linked) is reported to the parent, which unlinks it as
+/// soon as the exec outcome reaches it. Without procfs the write fd is
+/// closed (the kernel's ETXTBSY rule) and the name is the named rung.
 ///
 /// The whole function avoids the allocator so it is safe to run in a forked
 /// child before exec, where another thread may hold a malloc lock.
@@ -467,6 +724,104 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
             path[len] = 0;
             let cpath = path.as_ptr() as *const libc::c_char;
 
+            // O_TMPFILE first (Linux 3.11+ on supporting filesystems): the
+            // payload's write phase then happens in an inode with no name at
+            // all — a crash mid-write leaves nothing behind.
+            if !hook_disabled(b"MEMFD_NG_TEST_NO_OTMPFILE\0") {
+                let fd = libc::open(
+                    dir,
+                    libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+                    0o700,
+                );
+                if fd >= 0 {
+                    let staged = libc::fchmod(fd, 0o700) == 0 && write_all(fd, code).is_ok();
+                    if !staged {
+                        let err = Error::last_os_error();
+                        // the inode dies here; there was never a name
+                        libc::close(fd);
+                        last_err.get_or_insert(err);
+                    } else if proc_available() {
+                        // Reopen read-only through procfs for the fd rungs,
+                        // and link the anonymous inode into place so a named
+                        // rung can take over if the fd rungs are refused
+                        // (user-mode emulators re-exec themselves and lose
+                        // CLOEXEC fds, so /proc/self/fd rungs cannot work
+                        // there). The linkat-via-/proc form needs no
+                        // privileges. The parent unlinks the name the moment
+                        // the exec outcome is known.
+                        let mut pbuf = [0u8; 32];
+                        let mut ro = -1;
+                        if proc_fd_path(fd, &mut pbuf).is_some() {
+                            ro = libc::open(
+                                pbuf.as_ptr() as *const libc::c_char,
+                                libc::O_RDONLY | libc::O_CLOEXEC,
+                            );
+                        }
+                        if ro >= 0 {
+                            let linked = libc::linkat(
+                                libc::AT_FDCWD,
+                                pbuf.as_ptr() as *const libc::c_char,
+                                libc::AT_FDCWD,
+                                cpath,
+                                AT_SYMLINK_FOLLOW,
+                            ) == 0;
+                            libc::close(fd);
+                            if linked {
+                                let mut bytes = [0u8; 192];
+                                bytes[..path.len()].copy_from_slice(&path);
+                                return Ok(TmpfsPayload {
+                                    fd: ro,
+                                    named: Some(NamedPath { bytes, len: len + 1 }),
+                                });
+                            }
+                            // link refused (odd /proc mount): fd-only, the
+                            // fd rungs carry it on real kernels
+                            return Ok(TmpfsPayload { fd: ro, named: None });
+                        }
+                        let err = Error::last_os_error();
+                        libc::close(fd);
+                        last_err.get_or_insert(err);
+                    } else {
+                        // No procfs: link the anonymous inode into place so
+                        // the named rung can exec it — the /proc-less linkat
+                        // dance. Needs CAP_DAC_READ_SEARCH; without it this
+                        // fails closed into named staging below. The payload
+                        // gains a name only at the moment it must be execed
+                        // by name, and the write handle is closed first so
+                        // the named exec cannot hit ETXTBSY.
+                        let linked = libc::linkat(
+                            fd,
+                            b"\0".as_ptr() as *const libc::c_char,
+                            libc::AT_FDCWD,
+                            cpath,
+                            AT_EMPTY_PATH,
+                        ) == 0;
+                        if linked {
+                            libc::close(fd);
+                            let mut bytes = [0u8; 192];
+                            bytes[..path.len()].copy_from_slice(&path);
+                            return Ok(TmpfsPayload {
+                                fd: -1,
+                                named: Some(NamedPath { bytes, len: len + 1 }),
+                            });
+                        }
+                        let err = Error::last_os_error();
+                        libc::close(fd); // still unnamed: the inode dies here
+                        last_err.get_or_insert(err);
+                    }
+                }
+                // O_TMPFILE refused (old kernel, unsupported fs, EMFILE...):
+                // fall through to named staging in this same directory.
+            }
+
+            // Test hook: forbid the named-staging flow, so a successful
+            // staging can only have come from the O_TMPFILE path.
+            #[cfg(feature = "test-hooks")]
+            if hook_disabled(b"MEMFD_NG_TEST_NO_NAMED_STAGE\0") {
+                last_err.get_or_insert(Error::from_raw_os_error(libc::EPERM));
+                continue;
+            }
+
             let open_flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
             let mut fd = libc::open(cpath, open_flags, 0o700);
             if fd < 0 {
@@ -505,6 +860,9 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
             // Swap the write fd for a read-only one: the kernel refuses to
             // exec a file that is open for writing (ETXTBSY) unless it is a
             // memfd. With procfs this is a plain reopen by /proc/self/fd.
+            // The name is KEPT: the fd rungs exec it first, but emulators
+            // can only exec the named rung, and the parent unlinks the name
+            // as soon as the exec outcome reaches it.
             if proc_available() {
                 let mut pbuf = [0u8; 32];
                 if proc_fd_path(fd, &mut pbuf).is_some() {
@@ -514,10 +872,12 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
                     );
                     if ro >= 0 {
                         libc::close(fd);
-                        // The name is dead weight now: both rungs are
-                        // fd-based and both work on an unlinked inode.
-                        libc::unlink(cpath);
-                        return Ok(TmpfsPayload { fd: ro, named: None });
+                        let mut bytes = [0u8; 192];
+                        bytes[..path.len()].copy_from_slice(&path);
+                        return Ok(TmpfsPayload {
+                            fd: ro,
+                            named: Some(NamedPath { bytes, len: len + 1 }),
+                        });
                     }
                 }
                 let err = Error::last_os_error();
@@ -548,6 +908,7 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
 // ---------------------------------------------------------------------------
 
 /// A message the forked child sends before exec or exit.
+#[derive(Debug)]
 pub enum PipeMsg {
     /// Child execed successfully and the pipe closed: EOF.
     Success,

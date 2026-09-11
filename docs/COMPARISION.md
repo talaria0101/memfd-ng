@@ -25,7 +25,7 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | noexec-mount awareness | yes (`ST_NOEXEC` via raw statfs) | no | no (is_exe can't see mounts) | n/a | std checks at exec |
 | fails when procfs absent | yes (fstat + fd rungs, no `/proc` reads) | no (would misreport) | no (is_exe needs `/proc`) | n/a | needs real path |
 | ETXTBSY handling | read-only fd swap (measured kernel asymmetry) | n/a | n/a (single write-fd fexecve only works because memfd is exempt) | n/a | n/a |
-| fallback cleanup | unlinked in-child (procfs) / parent unlinks after reap (no-procfs), no race | n/a | forked helper sleeps 2 ms then `rm -rf` — race vs the execing process | n/a | n/a |
+| fallback cleanup | write phase anonymous (`O_TMPFILE`); name linked only while a rung may need it, unlinked by the parent the moment the exec outcome arrives — no race | n/a | forked helper sleeps 2 ms then `rm -rf` — race vs the execing process | n/a | n/a |
 | fallback noise | none, ever | n/a | writes `" Trying tmpfile in ..."` to stderr unconditionally | n/a | none |
 
 ## Correctness
@@ -37,7 +37,7 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | payload fd closed on exec (`MFD_CLOEXEC`) | always | yes | **never** — `is_running_in_qemu()` hardcoded true → flags empty | n/a (creation option) | n/a |
 | fd leak into grandchildren | none (measured: child sees fds 0–3) | n/a | **yes** (measured: child sees extra fd) | n/a | none |
 | `MFD_EXEC` / `vm.memfd_noexec` awareness | yes, probed once, graceful pre-6.3 | no | no | yes (options + probe) | n/a |
-| payload sealing | default on (`SHRINK\|GROW\|WRITE`), opt-out | no | no | yes (option, default on) | n/a |
+| payload sealing | default on (`SHRINK\|GROW\|WRITE`), granular `seals()` incl. `F_SEAL_FUTURE_WRITE`, opt-out | no | no | yes (option, default on) | n/a |
 | fallback filename source | library-generated (`uid-pid-128 bit rand`) — no user input in paths | n/a | **program name joined into path** — `/` in name is path traversal | n/a | n/a |
 | partial-write safe payload write | loop with `WriteZero` guard | single `write` | single `write` | n/a | n/a |
 | fallback errno fidelity | real errno per directory | n/a | everything mapped to `PermissionDenied` | n/a | yes |
@@ -53,19 +53,24 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | `Stdio` from `File`/fd | yes (`From<File>`, `From<FileDesc>`, type exported) | Fd variant unreachable | Fd variant unreachable | n/a |
 | redacted `Debug` (no payload dump) | yes | no (derives) | no (derives) | n/a |
 | `exec()` replace-self API | yes | yes | yes | n/a |
+| pidfd spawn (`CLONE_PIDFD\|CLONE_VFORK`) | **yes** (5.3+; fork fallback) + `Child::pidfd()` poll-able | no | no | n/a |
+| PID-reuse-immune kill/wait | **yes** (`pidfd_send_signal` / `waitid(P_PIDFD)`) | no | no | n/a |
+| process groups (`setsid`/`process_group`) | **yes** | no | no | n/a |
+| `MFD_HUGETLB` staging (graceful degrade) | **yes** | no | no | yes (creation option, no exec API) |
+| granular sealing verified via `F_GET_SEALS` | **yes** (in-suite) | n/a | n/a | no |
 
 ## Engineering
 
 | | memfd-ng | novafacing | VHSgunzo fork | memfd-rs |
 | --- | --- | --- | --- | --- |
 | binary size (minimal driver, stripped release) | **409 KB** | n/m | 465 KB | n/m |
-| spawn, cold payload (300-iter, static exit-0 fixture) | **~560 µs** | n/m | ~606 µs | n/m |
-| spawn, re-used payload | **~283 µs** (fork has no equivalent) | n/m | ~580 µs | n/m |
-| std control | ~178 µs | | | |
-| tests | 32 integration + 5 doctests, std-as-oracle differential suite, cc-built real static+dynamic fixtures, 136-byte hand-assembled ELF, feature-gated forced-rung tests | clang-dependent tests | clang-dependent tests (skip without clang) | unit tests |
+| spawn, cold payload (300-iter, static exit-0 fixture) | **~552 µs** | n/m | ~606 µs | n/m |
+| spawn, re-used payload | **~275 µs** (fork has no equivalent) | n/m | ~580 µs | n/m |
+| std control | ~188 µs | | | |
+| tests | 80+ tests: std-as-oracle differential suite, pidfd/poll, process groups, granular seals, hugetlb, O_TMPFILE A/B, protocol fuzzer (10 000+ deterministic cases), CLI end-to-end, C FFI from Rust and real C; cc-built real static+dynamic fixtures; 136-byte hand-assembled ELF; feature-gated forced-rung tests | clang-dependent tests | clang-dependent tests (skip without clang) | unit tests |
 | build without clang | yes | lib yes / tests no | lib yes / tests no | yes |
-| platforms verified this session | x86_64 gnu (runtime), x86_64 musl static (runtime), aarch64 gnu+musl (build/link) | x86_64 | x86_64 | linux/freebsd/android via rustix (upstream CI) |
-| FreeBSD | cfg-gated `fexecve` rung, compile-reviewed, **untested** | no | no | yes (CI) |
+| platforms verified | x86_64 gnu (runtime), aarch64 gnu under qemu-user + binfmt (CI), musl compile-checked, FreeBSD 14.2 VM (CI, full suite) | x86_64 | x86_64 | linux/freebsd/android via rustix (upstream CI) |
+| FreeBSD | **CI-verified**: full suite in a FreeBSD 14.2 VM (`fexecve` rung included) | no | no | yes (CI) |
 | MSRV | 1.64 | old | ≥1.69 (nix 0.31) | 1.85 |
 | stderr discipline | never writes | n/a | writes on fallback/disabled paths | n/a |
 

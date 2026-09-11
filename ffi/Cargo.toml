@@ -1,0 +1,18 @@
+[package]
+name = "memfd-ng-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.64"
+license = "0BSD"
+description = "C FFI layer for memfd-ng: execute ELF binaries straight from memory, from any language"
+repository = "https://github.com/talaria0101/memfd-ng"
+keywords = ["memfd", "ffi", "c-api", "exec"]
+categories = ["os::unix-apis", "external-ffi-bindings"]
+
+[lib]
+name = "memfd_ng_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+memfd-ng = { path = ".." }
+libc = "0.2"

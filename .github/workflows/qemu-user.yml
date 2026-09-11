@@ -1,0 +1,42 @@
+name: qemu-user
+
+# Roadmap item 6: run the full suite under qemu-user to prove guest execution
+# instead of documenting it. The runner registers binfmt_misc system-wide, so
+# the KERNEL transparently executes guest-arch children of the emulated test
+# process — which is exactly the spawn path memfd-ng exercises (memfd rungs,
+# tmpfs ladder, CLOEXEC-pipe protocol). Without binfmt this suite cannot work:
+# the kernel answers ENOEXEC for every guest-arch exec (verified locally — see
+# docs/reviews/REVIEW-9).
+#
+# Under emulation the ladder prefers fd-based exec (execveat / /proc/self/fd),
+# which qemu implements; the tmpfs ladder exists for emulators that don't.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  aarch64:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static
+      MEMFD_NG_TEST_CC: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install qemu-user-static (registers binfmt_misc) and the aarch64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static gcc-aarch64-linux-gnu
+          ls /proc/sys/fs/binfmt_misc/ | grep aarch64 || (echo "binfmt not registered" && exit 1)
+      - name: tests (default features)
+        run: cargo test --target aarch64-unknown-linux-gnu
+      - name: tests (test-hooks: forced exec-ladder rungs)
+        run: cargo test --features test-hooks --target aarch64-unknown-linux-gnu
+      - name: tests (cli feature)
+        run: cargo test --features cli --target aarch64-unknown-linux-gnu
+      - name: doctests
+        run: cargo test --doc --target aarch64-unknown-linux-gnu

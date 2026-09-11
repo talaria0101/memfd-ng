@@ -54,8 +54,16 @@ mod stdio;
 mod sys;
 
 pub use child::{Child, ChildStderr, ChildStdin, ChildStdout};
-pub use executable::MemFdExecutable;
+pub use executable::{MemFdExecutable, SealFlags};
 pub use file_desc::FileDesc;
 pub use output::Output;
 pub use process::ExitStatus;
 pub use stdio::Stdio;
+
+/// Wire access to the CLOEXEC-pipe protocol for the integration fuzzer.
+/// Compiled only under the `test-hooks` feature; the shapes are documented
+/// on the individual functions in `sys`.
+#[cfg(feature = "test-hooks")]
+pub mod protocol {
+    pub use crate::sys::{pipe_read, pipe_write_errno, pipe_write_named_path, PipeMsg};
+}

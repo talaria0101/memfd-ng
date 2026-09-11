@@ -10,17 +10,29 @@ readme = "README.md"
 keywords = ["memfd", "exec", "fexecve", "memory", "process"]
 categories = ["os::unix-apis"]
 
+[workspace]
+members = ["ffi"]
+
 [dependencies]
 libc = "0.2.170"
 
-[features]
-# Compiles two env-var hooks (MEMFD_NG_TEST_NO_EXECVEAT / MEMFD_NG_TEST_NO_PROC)
-# that let integration tests force the exec-ladder into its fallback rungs.
-# Off by default; `cargo test --features test-hooks` exercises them.
-test-hooks = []
-
 [dev-dependencies]
 libc = "0.2"
+
+[[bin]]
+name = "memfd-run"
+path = "src/bin/memfd-run.rs"
+required-features = ["cli"]
+
+[features]
+# Compiles two env-var hooks (MEMFD_NG_TEST_NO_EXECVEAT / MEMFD_NG_TEST_NO_PROC
+# / MEMFD_NG_TEST_NO_OTMPFILE / MEMFD_NG_TEST_NO_NAMED_STAGE) that let
+# integration tests force the exec-ladder into its fallback rungs and staging
+# mechanisms. Off by default; `cargo test --features test-hooks` exercises them.
+test-hooks = []
+# Builds the `memfd-run` binary: exec a file from memory from the shell.
+# Off by default so the library stays lean.
+cli = []
 
 [[bench]]
 name = "spawn"

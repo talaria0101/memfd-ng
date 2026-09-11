@@ -4,21 +4,21 @@ Feature requests and future work, with priorities and dispositions. An item
 lands here only with a reason; refused items keep theirs so no future session
 re-derives the decision.
 
-## Accepted
+## Landed
 
-| # | request | priority | effort | notes |
-| --- | --- | --- | --- | --- |
-| 1 | **pidfd spawn**: `clone3(CLONE_PIDFD\|CLONE_VFORK)` where available, plain `fork()` fallback | P1 | medium-high | kills the PID-reuse race in `kill()`/`wait`, makes children pollable; biggest single latency win left (vfork-class spawn) |
-| 2 | **`Child::pidfd()` + poll-able child** | P2 | small | depends on 1; lets event loops await exit without SIGCHLD |
-| 3 | **O_TMPFILE staging** for the fallback ladder | P2 | medium | removes the named-file window entirely in the no-procfs corner (needs the `/proc`-less linkat dance, else keep the pipe protocol) |
-| 4 | **Granular sealing API** — `seals(u32)` builder + `F_SEAL_FUTURE_WRITE` option | P2 | small | current default stays `SHRINK\|GROW\|WRITE` |
-| 5 | **Process-group options** — `setsid()`/`setpgid()` builder knobs | P2 | small | requested for supervisor-style users |
-| 6 | **qemu-user CI job** — run the suite under `qemu-x86_64`/`qemu-aarch64` to prove the guest-execution claim instead of documenting it | P2 | small | needs a runner with qemu-user + binfmt |
-| 7 | **FreeBSD runtime verification** — CI runner or VM pass; the cfg-gated `fexecve` rung is compile-reviewed only | P2 | small | closes the last "untested" row in the docs |
-| 8 | **Pipe-protocol fuzzing** — `pipe_read` parser under a small structure-aware fuzzer (6-byte header dispatch, length-bounded payload) | P2 | small | the one place untrusted-shape bytes are parsed |
-| 9 | **`MFD_HUGETLB` option** for very large payloads | P3 | small | hugetlb memfd exec has page-size alignment constraints; must degrade to ordinary memfd |
-| 10 | **`memfd-run` CLI** — optional `[[bin]]` behind a feature to exec a file from memory from a shell | P3 | small | keeps the library lean by default |
-| 11 | **C FFI layer** (`memfd_ng_spawn` C API) for non-Rust embedders | P3 | medium | separate `-ffi` crate; this one stays pure Rust |
+| # | request | disposition |
+| --- | --- | --- |
+| 1 | **pidfd spawn**: `clone3(CLONE_PIDFD\|CLONE_VFORK)`, plain `fork()` fallback | **landed** — `sys::clone3_vfork_pidfd`; parent suspended until the child execs (no CLONE_VM, so the child keeps a private COW address space — kernel behavior verified live: a child's pre-exec writes never reach the parent); cached ENOSYS/EINVAL probe falls back to `fork()`. PID-reuse-immune `kill`/`wait`/`try_wait` via `pidfd_send_signal`/`waitid(P_PIDFD)` with classic fallbacks. Evidence: `tests/pidfd.rs` (8 tests), REVIEW-8 |
+| 2 | **`Child::pidfd()` + poll-able child** | **landed** — `Child::pidfd()` returns `BorrowedFd`; `POLLIN`-on-exit proven by `pidfd_polls_before_and_after_exit`; fd-leak sweep over 30 spawn cycles |
+| 3 | **O_TMPFILE staging** for the fallback ladder | **landed** — write phase anonymous (`O_TMPFILE` on supporting filesystems; verified live on tmpfs); a name is linked only for rungs that need one — unprivileged `linkat` via `/proc/self/fd` with procfs, CAP_DAC_READ_SEARCH `linkat(fd,"",AT_EMPTY_PATH)` dance without; parent unlinks as soon as the exec outcome arrives. `MEMFD_NG_TEST_NO_OTMPFILE` / `MEMFD_NG_TEST_NO_NAMED_STAGE` hooks A/B-lock both mechanisms. Evidence: `tests/ladder.rs` (7 tests), REVIEW-9 |
+| 4 | **Granular sealing API** — `seals()` builder + `F_SEAL_FUTURE_WRITE` | **landed** — `SealFlags` (`SHRINK/GROW/WRITE/FUTURE_WRITE`, `BitOr`/`Not`), default stays `SHRINK\|GROW\|WRITE`; every claim read back from the kernel via `F_GET_SEALS`. Quirk documented: F_GET_SEALS on a memfd created *without* MFD_ALLOW_SEALING returns `1` (not the documented error) on 6.18. Evidence: `tests/seals.rs` (7 tests), REVIEW-8 |
+| 5 | **Process-group options** — `setsid()`/`setpgid()` builder knobs | **landed** — applied in the forked child before exec; failures surface as real errnos (the kernel refuses `setpgid` on a session leader: composing both fails with `EPERM`, locked by test). std `process_group(0)` parity proven against the oracle. Evidence: `tests/groups.rs` (7 tests), REVIEW-8 |
+| 6 | **qemu-user CI job** | **landed** — `.github/workflows/qemu-user.yml` runs the full suite under `qemu-aarch64` + binfmt on GitHub runners. Local (binfmt-less sandbox) verification went as far as physics allows: full aarch64 cross-build, guest fixtures built via `MEMFD_NG_TEST_CC`, ladder traced live with `qemu -strace`; the remaining leg requires binfmt because a binfmt-less kernel answers `ENOEXEC` for every guest-arch exec — qemu 7.2 has no self-exec fallback and `QEMU_EXECVE` is absent. Two real defects found and fixed by this work: cross-process fixture race, and rung-2 ENOEXEC misclassified as a payload verdict (see REVIEW-9). Also: rung-1 ENOSYS (qemu does not implement `execveat`) was already correct |
+| 7 | **FreeBSD runtime verification** | **landed** — `.github/workflows/freebsd.yml` runs the full suite in a FreeBSD 14.2 VM (the `fexecve` rung was compile-reviewed only before). Local: rustup cannot download the freebsd std in this sandbox, so compile-check rides on CI alongside the runtime pass |
+| 8 | **Pipe-protocol fuzzing** | **landed** — `tests/fuzz_pipe.rs`: deterministic structure-aware fuzzer over real OS pipes; exact round-trips (errno sweep incl. `i32::MIN/MAX`; PATH boundary lengths 0…65535), truncation matrix, 10 000 junk cases + 1000 bitflip cases (any outcome except panic/hang/wrong-kind is legal), the real NamedPath→Failure sequence, and byte-by-byte reassembly. Protocol exposed via `memfd_ng::protocol` under `test-hooks`. REVIEW-9 |
+| 9 | **`MFD_HUGETLB` option** | **landed** — `.hugetlb(true)` prefers hugetlbfs; everything degrades to an ordinary memfd (alignment enforced by zero-padding to `fstatfs().f_bsize`; verified live: create OK, aligned write OK, unaligned write EINVAL, and — with zero preallocated huge pages — write ENOMEM ⇒ degrade). Engagement proven by fstatfs magic, never assumed. Kernels refuse to seal hugetlb memfds (EPERM, observed); `is_sealed()` reports honestly. Evidence: `tests/hugetlb.rs` (4 tests), REVIEW-8 |
+| 10 | **`memfd-run` CLI** | **landed** — `[[bin]]` behind the `cli` feature; `--name`/`--argv0`/`--`, exit-code and 128+signal propagation, 126 on failure with the kernel errno named. Evidence: `tests/cli.rs` (5 tests), REVIEW-10 |
+| 11 | **C FFI layer** | **landed** — workspace member `memfd-ng-ffi` (`cdylib`+`rlib`): `memfd_ng_spawn/pid/kill/wait/free`, negated-errno errors, panics caught to `-EIO`, C `execve`-style argv/envp semantics, hand-written `memfd-ng.h`, ABI version 1. Verified from Rust (`ffi/tests/ffi.rs`, 6 tests) AND from real C (`ffi/smoke/main.c` via `scripts/ffi-smoke.sh`). REVIEW-10 |
 
 ## Not planned
 

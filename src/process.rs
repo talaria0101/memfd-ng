@@ -1,40 +1,84 @@
-//! Child process handle (waitpid) and exit-status decoding.
+//! Child process handle (waitpid/waitid) and exit-status decoding.
+//!
+//! When the child was spawned via clone3(CLONE_PIDFD), the handle carries a
+//! pidfd: kill and wait then go through pidfd_send_signal / waitid(P_PIDFD),
+//! which stay correct even if the child's PID was recycled in the meantime.
+//! On kernels without that machinery the classic waitpid/kill path is used
+//! against the cached PID, exactly as std does.
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{Error, ErrorKind, Result};
 
 use crate::cvt::{cvt, cvt_r};
+use crate::sys;
 
 pub struct Process {
     pid: libc::pid_t,
+    /// pidfd from clone3(CLONE_PIDFD); None on the plain-fork fallback.
+    pidfd: Option<libc::c_int>,
     status: Option<ExitStatus>,
 }
 
 impl Process {
-    pub unsafe fn new(pid: libc::pid_t) -> Self {
-        Process { pid, status: None }
+    pub unsafe fn new(pid: libc::pid_t, pidfd: Option<libc::c_int>) -> Self {
+        Process {
+            pid,
+            pidfd,
+            status: None,
+        }
     }
 
     pub fn id(&self) -> u32 {
         self.pid as u32
     }
 
+    /// The pidfd of the child, if the kernel provided one. Pollable: poll(2)
+    /// reports POLLIN once the child has exited, even before it is reaped.
+    /// Valid across PID reuse; owned by this Process.
+    pub fn pidfd(&self) -> Option<libc::c_int> {
+        self.pidfd
+    }
+
     pub fn kill(&mut self) -> Result<()> {
         // Once reaped the pid can be recycled; refuse to kill whoever wears
         // it next.
         if self.status.is_some() {
-            Err(Error::new(
+            return Err(Error::new(
                 ErrorKind::InvalidInput,
                 "invalid argument: can't kill an exited process",
-            ))
-        } else {
-            cvt(unsafe { libc::kill(self.pid, libc::SIGKILL) }).map(drop)
+            ));
         }
+        if let Some(pidfd) = self.pidfd {
+            match sys::pidfd_send_signal_kill(pidfd) {
+                Ok(()) => return Ok(()),
+                Err(ref e) if sys::is_unsupported(e) => {} // kernel < 5.1: fall through
+                Err(e) => return Err(e),
+            }
+        }
+        cvt(unsafe { libc::kill(self.pid, libc::SIGKILL) }).map(drop)
     }
 
     pub fn wait(&mut self) -> Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
+        }
+        if let Some(pidfd) = self.pidfd {
+            match sys::waitid_pidfd(pidfd, false) {
+                Ok(Some(raw)) => {
+                    let decoded = ExitStatus(raw);
+                    self.status = Some(decoded);
+                    return Ok(decoded);
+                }
+                // blocking waitid always yields a status
+                Ok(None) => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "waitid(P_PIDFD) returned no status",
+                    ))
+                }
+                Err(ref e) if sys::is_unsupported(e) => {} // kernel < 5.4: fall through
+                Err(e) => return Err(e),
+            }
         }
         let mut status = 0 as libc::c_int;
         cvt_r(|| unsafe { libc::waitpid(self.pid, &mut status, 0) })?;
@@ -47,6 +91,18 @@ impl Process {
         if let Some(status) = self.status {
             return Ok(Some(status));
         }
+        if let Some(pidfd) = self.pidfd {
+            match sys::waitid_pidfd(pidfd, true) {
+                Ok(Some(raw)) => {
+                    let decoded = ExitStatus(raw);
+                    self.status = Some(decoded);
+                    return Ok(Some(decoded));
+                }
+                Ok(None) => return Ok(None),
+                Err(ref e) if sys::is_unsupported(e) => {} // kernel < 5.4: fall through
+                Err(e) => return Err(e),
+            }
+        }
         let mut status = 0 as libc::c_int;
         let pid = cvt(unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) })?;
         if pid == 0 {
@@ -55,6 +111,14 @@ impl Process {
             let decoded = ExitStatus(status);
             self.status = Some(decoded);
             Ok(Some(decoded))
+        }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        if let Some(pidfd) = self.pidfd {
+            unsafe { libc::close(pidfd) };
         }
     }
 }

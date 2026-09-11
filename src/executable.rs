@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::os::unix::io::FromRawFd;
 
-use libc::{c_int, pid_t, sigemptyset, signal};
+use libc::{c_int, sigemptyset, signal};
 
 use crate::{
     anon_pipe::anon_pipe,
@@ -23,6 +23,66 @@ use crate::{
     stdio::{ChildPipes, Stdio, StdioPipes},
     sys,
 };
+
+/// A set of `F_SEAL_*` bits for [`MemFdExecutable::seals`]. The crate
+/// default is `SealFlags::full()` (`SHRINK | GROW | WRITE`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SealFlags(libc::c_int);
+
+impl SealFlags {
+    /// The file cannot be reduced in size (`F_SEAL_SHRINK`).
+    pub const SHRINK: SealFlags = SealFlags(0x0001);
+    /// The file cannot grow (`F_SEAL_GROW`).
+    pub const GROW: SealFlags = SealFlags(0x0002);
+    /// The contents cannot be modified through any writable handle
+    /// (`F_SEAL_WRITE`).
+    pub const WRITE: SealFlags = SealFlags(0x0008);
+    /// Like `WRITE`, but handles that were already writable keep working
+    /// (`F_SEAL_FUTURE_WRITE`, kernel 5.1+).
+    pub const FUTURE_WRITE: SealFlags = SealFlags(0x0010);
+
+    /// The default seal set: `SHRINK | GROW | WRITE`.
+    pub const fn full() -> SealFlags {
+        SealFlags(sys::SEALS_FULL)
+    }
+
+    /// The raw `F_SEAL_*` bits.
+    pub const fn bits(self) -> libc::c_int {
+        self.0
+    }
+
+    /// True when every bit of `other` is set in `self`.
+    pub const fn contains(self, other: SealFlags) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for SealFlags {
+    type Output = SealFlags;
+    fn bitor(self, rhs: SealFlags) -> SealFlags {
+        SealFlags(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for SealFlags {
+    fn bitor_assign(&mut self, rhs: SealFlags) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for SealFlags {
+    type Output = SealFlags;
+    fn bitand(self, rhs: SealFlags) -> SealFlags {
+        SealFlags(self.0 & rhs.0)
+    }
+}
+
+impl std::ops::Not for SealFlags {
+    type Output = SealFlags;
+    fn not(self) -> SealFlags {
+        SealFlags(!self.0 & sys::SEALS_FULL)
+    }
+}
 
 /// This is the main struct used to create an in-memory only executable.
 /// Wherever possible, it is a drop-in replacement for the standard library's
@@ -83,6 +143,14 @@ pub struct MemFdExecutable<'a> {
     saw_nul: bool,
     /// Whether to seal the memfd after writing (default: yes, when supported)
     sealed: bool,
+    /// Which seals to apply (default: SHRINK | GROW | WRITE)
+    seal_flags: SealFlags,
+    /// Stage the payload on hugetlbfs instead of an ordinary memfd
+    hugetlb: bool,
+    /// Run the child in a new session (setsid(2))
+    setsid: bool,
+    /// Run the child in a specific process group (setpgid(0, pgid))
+    process_group: Option<i32>,
     /// Prepared memfd cache: written and sealed once, executed many times
     prepared: Option<Prepared>,
 }
@@ -91,6 +159,7 @@ pub struct MemFdExecutable<'a> {
 struct Prepared {
     fd: FileDesc,
     sealed: bool,
+    hugetlb: bool,
 }
 
 struct Argv(Vec<CString>);
@@ -111,6 +180,10 @@ impl std::fmt::Debug for MemFdExecutable<'_> {
             .field("stderr", &self.stderr)
             .field("saw_nul", &self.saw_nul)
             .field("sealed", &self.sealed)
+            .field("seal_flags", &self.seal_flags)
+            .field("hugetlb", &self.hugetlb)
+            .field("setsid", &self.setsid)
+            .field("process_group", &self.process_group)
             .field("prepared", &self.prepared.is_some())
             .finish()
     }
@@ -179,6 +252,10 @@ impl<'a> MemFdExecutable<'a> {
             stderr: None,
             saw_nul,
             sealed: true,
+            seal_flags: SealFlags::full(),
+            hugetlb: false,
+            setsid: false,
+            process_group: None,
             prepared: None,
         }
     }
@@ -346,7 +423,8 @@ impl<'a> MemFdExecutable<'a> {
     }
 
     /// Create the memfd now: write the payload and, when the kernel supports
-    /// it, seal it against shrinking, growing and writing.
+    /// it, seal it against the configured [`SealFlags`] (default: shrink,
+    /// grow and write).
     ///
     /// Spawning prepares the payload anyway, but calling this once makes
     /// every later `spawn()` skip the write entirely: the sealed image is
@@ -356,6 +434,12 @@ impl<'a> MemFdExecutable<'a> {
     ///
     /// Preparing again simply replaces the previous image.
     pub fn prepare(&mut self) -> Result<&mut Self> {
+        // hugetlb(true) is a preference, never a hard requirement: every
+        // hugetlb failure (kernel without MFD_HUGETLB, unalignable size,
+        // no preallocated huge pages) degrades to an ordinary memfd.
+        if self.hugetlb && self.prepare_hugetlb().is_ok() {
+            return Ok(self);
+        }
         let name = os2c(OsStr::new(&self.name), &mut self.saw_nul);
         let fd = sys::memfd_create(name.as_ptr(), self.sealed)?;
         if !sys::is_regular_file(fd) {
@@ -364,12 +448,53 @@ impl<'a> MemFdExecutable<'a> {
             return Err(err);
         }
         sys::write_all(fd, self.code)?;
-        let sealed = self.sealed && sys::add_seals(fd);
+        let sealed =
+            self.sealed && self.seal_flags.bits() != 0 && sys::add_seals(fd, self.seal_flags.bits());
         self.prepared = Some(Prepared {
             fd: unsafe { FileDesc::from_raw_fd(fd) },
             sealed,
+            hugetlb: false,
         });
         Ok(self)
+    }
+
+    /// Prepare the payload on hugetlbfs: create with `MFD_HUGETLB`, then pad
+    /// the payload up to the huge-page size (hugetlbfs refuses unaligned
+    /// sizes with `EINVAL`; loaders ignore bytes past the last PT_LOAD, so
+    /// zero padding does not change the program). Err means degrade to the
+    /// ordinary memfd path.
+    fn prepare_hugetlb(&mut self) -> Result<()> {
+        let name = os2c(OsStr::new(&self.name), &mut self.saw_nul);
+        let fd = sys::memfd_create_hugetlb(name.as_ptr())?;
+        let bsize = match sys::hugetlb_page_size(fd) {
+            Some(bsize) if bsize > 0 => bsize as usize,
+            _ => {
+                unsafe { libc::close(fd) };
+                return Err(Error::from_raw_os_error(libc::ENOSYS));
+            }
+        };
+        let write_ok = if self.code.len() % bsize == 0 {
+            sys::write_all(fd, self.code).is_ok()
+        } else {
+            let mut padded = Vec::with_capacity(self.code.len() + bsize);
+            padded.extend_from_slice(self.code);
+            padded.resize(self.code.len() + (bsize - self.code.len() % bsize), 0);
+            sys::write_all(fd, &padded).is_ok()
+        };
+        if !write_ok {
+            unsafe { libc::close(fd) };
+            return Err(Error::from_raw_os_error(libc::EIO));
+        }
+        // Sealing is refused on hugetlbfs (EPERM, observed on 6.18); the
+        // payload runs unsealed, and is_sealed() reports that honestly.
+        let sealed =
+            self.sealed && self.seal_flags.bits() != 0 && sys::add_seals(fd, self.seal_flags.bits());
+        self.prepared = Some(Prepared {
+            fd: unsafe { FileDesc::from_raw_fd(fd) },
+            sealed,
+            hugetlb: true,
+        });
+        Ok(())
     }
 
     /// Whether a payload is already prepared (see [`prepare`]).
@@ -382,6 +507,13 @@ impl<'a> MemFdExecutable<'a> {
         self.prepared.as_ref().map(|p| p.sealed).unwrap_or(false)
     }
 
+    /// Whether the prepared payload (if any) lives on hugetlbfs. Only true
+    /// when `hugetlb(true)` was set AND the kernel accepted the facility;
+    /// otherwise the payload degraded to an ordinary memfd.
+    pub fn is_hugetlb(&self) -> bool {
+        self.prepared.as_ref().map(|p| p.hugetlb).unwrap_or(false)
+    }
+
     /// Toggle payload sealing. Sealing is on by default; kernels without
     /// sealing support silently skip it. Changing this invalidates any
     /// prepared image: the next spawn (or `prepare`) stages a fresh payload
@@ -391,6 +523,58 @@ impl<'a> MemFdExecutable<'a> {
             self.sealed = on;
             self.prepared = None;
         }
+        self
+    }
+
+    /// Choose exactly which seals land on the prepared payload. The default
+    /// is [`SealFlags::full()`]; pass e.g. `SealFlags::FUTURE_WRITE` to keep
+    /// already-open writable handles working while blocking new writes, or
+    /// `SealFlags::default()` (no bits) to keep the memfd sealable without
+    /// actually sealing anything under `sealed(true)`. Changing this
+    /// invalidates any prepared image.
+    pub fn seals(&mut self, flags: SealFlags) -> &mut Self {
+        if self.seal_flags != flags {
+            self.seal_flags = flags;
+            self.prepared = None;
+        }
+        self
+    }
+
+    /// Prefer staging the payload on hugetlbfs (`MFD_HUGETLB`, kernel 4.14+)
+    /// instead of an ordinary memfd. Intended for very large payloads on
+    /// machines with preallocated huge pages. Every hugetlb failure degrades
+    /// to an ordinary memfd, so a spawn never fails *because of* this
+    /// setting; check [`is_hugetlb`] after `prepare()` to see what actually
+    /// happened. Note that kernels refuse to seal hugetlb memfds, so a
+    /// hugetlb payload is unsealed even under `sealed(true)`. Changing this
+    /// invalidates any prepared image.
+    pub fn hugetlb(&mut self, on: bool) -> &mut Self {
+        if self.hugetlb != on {
+            self.hugetlb = on;
+            self.prepared = None;
+        }
+        self
+    }
+
+    /// Run the child in a new session (`setsid(2)`), detaching it from the
+    /// controlling terminal. The call happens in the forked child before
+    /// exec; a failure surfaces as the real errno through the normal
+    /// exec-failure channel. Note the kernel refuses `setpgid(2)` on a
+    /// session leader, so combining this with [`process_group`] fails the
+    /// spawn with `EPERM` — they are alternatives, not layers.
+    ///
+    /// [`process_group`]: MemFdExecutable::process_group
+    pub fn setsid(&mut self, on: bool) -> &mut Self {
+        self.setsid = on;
+        self
+    }
+
+    /// Run the child in process group `pgid` (`setpgid(0, pgid)`). Passing
+    /// `0` makes the child a leader of its own new group — the same meaning
+    /// as `std::process::Command::process_group(0)`. A failure surfaces as
+    /// the real errno through the normal exec-failure channel.
+    pub fn process_group(&mut self, pgid: i32) -> &mut Self {
+        self.process_group = Some(pgid);
         self
     }
 
@@ -416,7 +600,23 @@ impl<'a> MemFdExecutable<'a> {
             ));
         }
 
-        let envp = self.capture_env();
+        // Everything the forked child needs is built BEFORE the fork: the
+        // child runs without touching the allocator, so it cannot deadlock
+        // on a malloc lock another thread may hold.
+        let captured_env = self.capture_env();
+        let argv: Vec<*const libc::c_char> = self
+            .get_argv()
+            .iter()
+            .map(|s| s.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+        // borrowed from captured_env, which stays alive for the whole spawn
+        let envp: Option<Vec<*const libc::c_char>> = captured_env.as_ref().map(|v| {
+            v.iter()
+                .map(|s| s.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect()
+        });
         let (ours, theirs) = self.setup_io(Stdio::Inherit, true)?;
         let (input, output) = anon_pipe()?;
 
@@ -433,12 +633,19 @@ impl<'a> MemFdExecutable<'a> {
         // Whatever happens after the fork is almost for sure going to touch
         // or look at the environment in one way or another. The fork happens
         // here; the child never returns from do_exec on success.
-        let pid = unsafe { self.do_fork()? };
+        let (pid, pidfd) = self.do_fork()?;
 
         if pid == 0 {
             drop(input);
             let err = unsafe {
-                match self.do_exec(memfd_fd, quiet, theirs, envp.as_deref(), output.as_raw_fd()) {
+                match self.do_exec(
+                    memfd_fd,
+                    quiet,
+                    theirs,
+                    &argv,
+                    envp.as_deref(),
+                    output.as_raw_fd(),
+                ) {
                     Ok(()) => unreachable!("do_exec either execs or fails"),
                     Err(err) => err,
                 }
@@ -449,15 +656,20 @@ impl<'a> MemFdExecutable<'a> {
 
         drop(output);
 
-        let mut p = unsafe { Process::new(pid) };
+        let mut p = unsafe { Process::new(pid, pidfd) };
         let mut named_fallback: Option<PathBuf> = None;
 
         // loop to handle EINTR and the (no-procfs) named-path message
         loop {
             match sys::pipe_read(input.as_raw_fd()) {
                 Ok(sys::PipeMsg::Success) => {
+                    // The child execed (or died trying); any still-named
+                    // fallback file is ours to remove now.
+                    if let Some(path) = &named_fallback {
+                        let _ = std::fs::remove_file(path);
+                    }
                     let mut child = Child::new(p, ours);
-                    child.named_fallback = named_fallback;
+                    child.named_fallback = None;
                     return Ok(child);
                 }
                 Ok(sys::PipeMsg::NamedPath(path)) => {
@@ -542,8 +754,23 @@ impl<'a> MemFdExecutable<'a> {
         &self.cwd
     }
 
-    unsafe fn do_fork(&mut self) -> Result<pid_t> {
-        cvt(libc::fork())
+    /// Fork: clone3(CLONE_VFORK | CLONE_PIDFD) when the kernel has it (the
+    /// parent is suspended until the child execs, and the parent gets a
+    /// pidfd that is immune to PID reuse), plain fork() otherwise. Returns
+    /// (pid, pidfd) where pid == 0 in the child and pidfd is None there.
+    fn do_fork(&mut self) -> Result<(libc::pid_t, Option<libc::c_int>)> {
+        #[cfg(target_os = "linux")]
+        {
+            match sys::clone3_vfork_pidfd() {
+                Ok(sys::ForkOutcome::Child) => return Ok((0, None)),
+                Ok(sys::ForkOutcome::Parent { pid, pidfd }) => return Ok((pid, Some(pidfd))),
+                // probe verdict: no clone3 (< 5.3) or a policy refusing it
+                Err(ref e) if sys::is_unsupported(e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let pid = cvt(unsafe { libc::fork() })?;
+        Ok((pid, None))
     }
 
     fn capture_env(&mut self) -> Option<Vec<CString>> {
@@ -563,7 +790,20 @@ impl<'a> MemFdExecutable<'a> {
             return Error::new(ErrorKind::InvalidInput, "nul byte found in provided data");
         }
 
-        let envp = self.capture_env();
+        let captured_env = self.capture_env();
+        let argv: Vec<*const libc::c_char> = self
+            .get_argv()
+            .iter()
+            .map(|s| s.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+        // borrowed from captured_env, which stays alive through the exec
+        let envp: Option<Vec<*const libc::c_char>> = captured_env.as_ref().map(|v| {
+            v.iter()
+                .map(|s| s.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect()
+        });
         let memfd_fd = match self.ensure_prepared() {
             Ok(p) => p.fd.as_raw_fd(),
             Err(_) => -1, // kernel without memfd: the tmpfs ladder takes over
@@ -575,7 +815,7 @@ impl<'a> MemFdExecutable<'a> {
                 // pipe fd -1: no parent survives to read a named-path report,
                 // so a named fallback file in a no-procfs environment stays
                 // behind (documented).
-                match self.do_exec(memfd_fd, quiet, theirs, envp.as_deref(), -1) {
+                match self.do_exec(memfd_fd, quiet, theirs, &argv, envp.as_deref(), -1) {
                     Ok(()) => Error::new(ErrorKind::Other, "exec returned without replacing"),
                     Err(err) => err,
                 }
@@ -612,8 +852,13 @@ impl<'a> MemFdExecutable<'a> {
         Ok(self.prepared.as_ref().unwrap())
     }
 
-    /// The child half of spawn: wire up stdio, reset signals, then exec.
-    /// Runs in the forked child; on success it never returns.
+    /// The child half of spawn: wire up stdio, reset signals, apply the
+    /// session/process-group knobs, then exec. Runs in the forked child; on
+    /// success it never returns.
+    ///
+    /// The body must stay allocation-free: `argv`/`envp` were built by the
+    /// caller before the fork, and every error carries a raw errno (a forked
+    /// child must not depend on a malloc lock another thread may hold).
     ///
     /// # Safety
     /// Must only run in a freshly forked child (or a process that is about to
@@ -623,7 +868,8 @@ impl<'a> MemFdExecutable<'a> {
         memfd_fd: c_int,
         quiet: bool,
         stdio: ChildPipes,
-        maybe_envp: Option<&[CString]>,
+        argv: &[*const libc::c_char],
+        maybe_envp: Option<&[*const libc::c_char]>,
         pipe_fd: c_int,
     ) -> Result<()> {
         if let Some(fd) = stdio.stdin.fd() {
@@ -662,32 +908,33 @@ impl<'a> MemFdExecutable<'a> {
             }
         }
 
-        let argv = self
-            .get_argv()
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect::<Vec<*const libc::c_char>>();
+        if self.setsid {
+            cvt(libc::setsid())?;
+        }
+        if let Some(pgid) = self.process_group {
+            cvt(libc::setpgid(0, pgid as libc::pid_t))?;
+        }
 
-        let envp_owned = maybe_envp.unwrap_or_default();
-        let envp = envp_owned
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect::<Vec<*const libc::c_char>>();
+        let envp: *const *const libc::c_char = match maybe_envp {
+            Some(v) => v.as_ptr(),
+            // No explicit environment: hand the exec the inherited environ
+            // global — std's own semantics (a real env snapshot lives in the
+            // fork-time copy of memory the child sees).
+            None => sys::inherited_environ(),
+        };
 
         if memfd_fd >= 0 && !quiet {
-            match sys::exec_fd(memfd_fd, argv.as_ptr(), envp.as_ptr()) {
+            match sys::exec_fd(memfd_fd, argv.as_ptr(), envp) {
                 Err(err) if fd_rung_exhausted(&err) => {
                     // memfd lives but fd-based exec is off the table (no
                     // execveat, or procfs disappeared, or a hardening layer
                     // refuses memfd exec): try the tmpfs ladder.
-                    return self.tmpfs_fallback(&argv, &envp, pipe_fd);
+                    return self.tmpfs_fallback(argv.as_ptr(), envp, pipe_fd);
                 }
                 other => return other.map(|()| unreachable!()),
             }
         }
-        self.tmpfs_fallback(&argv, &envp, pipe_fd)
+        self.tmpfs_fallback(argv.as_ptr(), envp, pipe_fd)
     }
 
     /// Write the payload to an executable tmpfs file and exec it. Runs in the
@@ -695,8 +942,8 @@ impl<'a> MemFdExecutable<'a> {
     /// parent through the CLOEXEC pipe as real errnos.
     fn tmpfs_fallback(
         &self,
-        argv: &[*const libc::c_char],
-        envp: &[*const libc::c_char],
+        argv: *const *const libc::c_char,
+        envp: *const *const libc::c_char,
         pipe_fd: c_int,
     ) -> Result<()> {
         let payload = sys::tmpfs_payload(self.code)?;
@@ -710,7 +957,7 @@ impl<'a> MemFdExecutable<'a> {
         }
 
         if payload.fd >= 0 {
-            match unsafe { sys::exec_fd(payload.fd, argv.as_ptr(), envp.as_ptr()) } {
+            match unsafe { sys::exec_fd(payload.fd, argv, envp) } {
                 Err(err) if fd_rung_exhausted(&err) => {
                     // Both fd rungs refused; without procfs there is no
                     // named rung left, so surface the real verdict.
@@ -723,11 +970,8 @@ impl<'a> MemFdExecutable<'a> {
         }
 
         match &payload.named {
-            Some(path) => unsafe { sys::exec_path(path.as_ptr(), argv.as_ptr(), envp.as_ptr()) },
-            None => Err(Error::new(
-                ErrorKind::Unsupported,
-                "fd rungs exhausted and no named fallback available",
-            )),
+            Some(path) => unsafe { sys::exec_path(path.as_ptr(), argv, envp) },
+            None => Err(Error::from_raw_os_error(libc::ENOSYS)),
         }
     }
 }
@@ -735,11 +979,13 @@ impl<'a> MemFdExecutable<'a> {
 /// True when both fd rungs declined for environmental reasons (no execveat /
 /// no procfs / exec forbidden), meaning a different backing file might still
 /// work. Real payload verdicts (ENOEXEC, EINVAL, ETXTBSY...) do not qualify.
+/// ENOSYS doubles as the allocation-free "rungs exhausted" marker produced
+/// by `sys::exec_fd` itself.
 fn fd_rung_exhausted(err: &Error) -> bool {
-    match err.raw_os_error() {
-        Some(libc::EACCES) | Some(libc::EPERM) => true,
-        _ => err.kind() == ErrorKind::Unsupported,
-    }
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::ENOSYS)
+    )
 }
 
 fn cvt_nz(ret: libc::c_int) -> Result<()> {
