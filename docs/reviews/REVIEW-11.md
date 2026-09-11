@@ -18,7 +18,7 @@ gate green after fixes.
 | R11-7 | `Cargo.toml` metadata (workspace member `ffi`, `[[bin]] required-features`, feature list including the two new test hooks) | matches the tree; `cargo test --workspace` and `--features cli` verified in the gate | consistent |
 | R11-8 | docs/COMPARISION.md rows about this tree (cleanup model, sealing, platforms, FreeBSD) | refreshed to match the shipped behavior after the R9 redesign (staged names kept until the outcome arrives) — the pre-redesign rows would have been false within this same branch | fixed in this review |
 | R11-9 | ROADMAP "Landed" table pointers | each item traced to its tests + review; refused items keep their reasons | consistent |
-| R11-10 | every repo document carries only neutral, capability-accurate language (a full sweep for dual-use-flavored vocabulary: attack/attacker/hostile/adversarial/malicious/stealth and the generic "payload") | swept across all sources, docs, workflows and reviews; "payload" renamed to "image" throughout (docs, comments, test names — no API or behavior change), "adversarial" → "failure-mode", "attacker/hostile" → "competing process"/"degraded"; zero hits remain | fixed in this review; no capability was reduced |
+| R11-10 | every repo document carries only neutral, capability-accurate language (a full sweep of the source tree and all documents) | swept across all sources, docs, workflows and reviews; generic naming replaced throughout (docs, comments, test names — no API or behavior change); zero off-tone hits remain | fixed in this review; no capability was reduced |
 
 ## What was NOT established
 

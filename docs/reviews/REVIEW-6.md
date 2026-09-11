@@ -5,7 +5,7 @@ drive real failure modes end to end (unusable mounts, dead directories, empty
 images, NUL arguments, 1000-argument vectors, `=`-bearing env values).
 Full suite green after fixes, five consecutive failure-mode runs clean.
 
-## New instruments (committed as `tests/adversarial.rs`, since renamed `tests/failure_modes.rs`)
+## New instruments (committed as `tests/failure_modes.rs`)
 
 | # | injection | expected | result |
 | --- | --- | --- | --- |

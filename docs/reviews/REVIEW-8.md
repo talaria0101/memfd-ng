@@ -16,7 +16,7 @@ suite green after fixes.
 | R8-6 | `AT_SYMLINK_FOLLOW` (0x400) / `AT_EMPTY_PATH` (0x1000) values and the two linkat forms | verified live: the procfs form `linkat(AT_FDCWD, "/proc/self/fd/N", …, AT_SYMLINK_FOLLOW)` succeeds unprivileged; the `linkat(fd, "", …, AT_EMPTY_PATH)` form succeeds here (root/CAP_DAC_READ_SEARCH) and is exercised by the no-procfs suite; both leave the inode dead when the fd closes unlinked |
 | R8-7 | `waitid` without `WNOHANG` returning `Ok(None)` | impossible per kernel contract; the case is handled as an explicit error rather than a panic (parent-side only) |
 | R8-8 | `KernelStatfs` reuse for `fstatfs` (hugetlb page size + magic) | verified live on a real hugetlb memfd: `f_type == 0x958458f6`, `f_bsize == 2 MiB`; unaligned writes refused EINVAL, aligned writes succeed, and with zero preallocated huge pages the write fails ⇒ documented degrade fires (`hugetlb_request_never_breaks_spawning`) |
-| R8-9 | errno fidelity of the new ladder tail | verified: the exhaustion marker is a raw `ENOSYS` produced without allocation; rung-1 `ENOEXEC` still surfaces immediately as the payload verdict; corrupt/empty images still report `ENOEXEC` (5 tests assert it) |
+| R8-9 | errno fidelity of the new ladder tail | verified: the exhaustion marker is a raw `ENOSYS` produced without allocation; rung-1 `ENOEXEC` still surfaces immediately as the image verdict; corrupt/empty images still report `ENOEXEC` (5 tests assert it) |
 | R8-10 | `MEMFD_NG_TEST_NO_OTMPFILE` / `MEMFD_NG_TEST_NO_NAMED_STAGE` hooks | verified as A/B forcing functions: with named staging forbidden, success can only have come from the O_TMPFILE path (`otmpfile_staging_serves_the_whole_ladder`); with O_TMPFILE off, the legacy flow behaves exactly as before |
 
 ## Verdict
