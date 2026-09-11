@@ -165,7 +165,7 @@ fn parity_kill_signal() {
 
 #[test]
 fn parity_dynamic_binary() {
-    // the same run through a dynamically linked payload
+    // the same run through a dynamically linked image
     let std_out = StdCommand::new(common::dynamic_stub())
         .args(["print", "dynamic"])
         .output()
@@ -182,11 +182,11 @@ fn parity_dynamic_binary() {
 #[test]
 fn parity_bad_executable_is_enoexec() {
     // std::process::Command on a non-executable file errors; a corrupt
-    // payload must surface the kernel's own verdict, not a panic exit code.
+    // image must surface the kernel's own verdict, not a panic exit code.
     let std_err = StdCommand::new("/tmp")
         .output()
         .unwrap_err();
-    let ng_err = MemFdExecutable::new("dir-as-payload", b"not an elf")
+    let ng_err = MemFdExecutable::new("dir-as-image", b"not an elf")
         .output()
         .unwrap_err();
     assert_eq!(std_err.raw_os_error(), Some(libc_like_eacces_or_enuexec_dir()));
@@ -194,7 +194,7 @@ fn parity_bad_executable_is_enoexec() {
     let ng = MemFdExecutable::new("bogus", b"\x7fELFgarbage").status();
     match ng {
         Err(e) => assert_eq!(e.raw_os_error(), Some(8)), // ENOEXEC
-        Ok(st) => panic!("corrupt payload execed: raw={}", st.into_raw()),
+        Ok(st) => panic!("corrupt image execed: raw={}", st.into_raw()),
     }
 }
 
@@ -205,14 +205,14 @@ fn libc_like_eacces_or_enuexec_dir() -> i32 {
 
 #[test]
 fn argv0_is_settable() {
-    // argv[0] must be distinct from the payload name via set_program
-    let out = MemFdExecutable::new("payload-name", stub_code())
+    // argv[0] must be distinct from the image name via set_program
+    let out = MemFdExecutable::new("image-name", stub_code())
         .arg("print") // would be argv[1]
         .stdout(Stdio::MakePipe)
         .spawn()
         .unwrap();
     let _ = out; // shape check: spawn with default args works
-    let mut exe = MemFdExecutable::new("payload-name", stub_code());
+    let mut exe = MemFdExecutable::new("image-name", stub_code());
     exe.set_program(std::ffi::OsStr::new("custom-argv0"));
     assert!(!exe.program_is_path());
     assert_eq!(exe.get_argv()[0].to_bytes(), b"custom-argv0");

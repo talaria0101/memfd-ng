@@ -37,7 +37,7 @@ fn rung2_proc_path_executes_when_execveat_is_refused() {
 #[test]
 fn named_rung_executes_and_parent_cleans_up_without_procfs() {
     // With procfs "absent": no execveat, no /proc/self/fd rung, the tmpfs
-    // payload keeps its name, and the named rung must exec it. The parent
+    // image keeps its name, and the named rung must exec it. The parent
     // owns the name from the moment the child reports it and unlinks after
     // reaping — assert nothing is left behind.
     let guard = common::serial();
@@ -62,7 +62,7 @@ fn named_rung_executes_and_parent_cleans_up_without_procfs() {
 
 #[test]
 fn named_rung_failure_cleans_up_via_pipe_protocol() {
-    // Same no-procfs corner, but the payload cannot exec at all: the child
+    // Same no-procfs corner, but the image cannot exec at all: the child
     // reports the errno through the CLOEXEC pipe and the parent must unlink
     // the still-named file it inherited ownership of.
     let guard = common::serial();
@@ -84,7 +84,7 @@ fn named_rung_failure_cleans_up_via_pipe_protocol() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn tiny_elf_still_runs_through_every_rung() {
-    // smoke the deterministic payload through the forced rungs one at a time
+    // smoke the deterministic image through the forced rungs one at a time
     let cases: &[(&str, Option<&str>)] = &[
         ("execveat", None),
         ("procfd", Some("MEMFD_NG_TEST_NO_EXECVEAT")),

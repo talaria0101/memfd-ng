@@ -21,7 +21,7 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | --- | --- | --- | --- | --- | --- |
 | fd-based exec | `execveat` `AT_EMPTY_PATH` (raw syscall) | glibc `fexecve` | glibc `fexecve` | n/a | n/a |
 | `/proc/self/fd` rung | yes (3.17/3.18) | no | no | n/a | n/a |
-| disk fallback at all | yes — silent tmpfs ladder, 4 dirs | no | yes — tmp, /dev/shm, ~/.cache | n/a | n/a |
+| disk fallback at all | yes — quiet tmpfs ladder (never writes to stderr), 4 dirs | no | yes — tmp, /dev/shm, ~/.cache | n/a | n/a |
 | noexec-mount awareness | yes (`ST_NOEXEC` via raw statfs) | no | no (is_exe can't see mounts) | n/a | std checks at exec |
 | fails when procfs absent | yes (fstat + fd rungs, no `/proc` reads) | no (would misreport) | no (is_exe needs `/proc`) | n/a | needs real path |
 | ETXTBSY handling | read-only fd swap (measured kernel asymmetry) | n/a | n/a (single write-fd fexecve only works because memfd is exempt) | n/a | n/a |
@@ -34,12 +34,12 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | --- | --- | --- | --- | --- | --- |
 | `ExitStatus::success` on exit 0 | **true** (`WIFEXITED`+`WEXITSTATUS`) | **false** (bug #23: `c_int::try_from` infallible) | **false** (same bug, still open) | n/a | true |
 | real errno from failed exec | yes (CLOEXEC-pipe protocol) | no — child panics, parent sees exit 101 | no — same panic shape | n/a | yes |
-| payload fd closed on exec (`MFD_CLOEXEC`) | always | yes | **never** — `is_running_in_qemu()` hardcoded true → flags empty | n/a (creation option) | n/a |
+| image fd closed on exec (`MFD_CLOEXEC`) | always | yes | **never** — `is_running_in_qemu()` hardcoded true → flags empty | n/a (creation option) | n/a |
 | fd leak into grandchildren | none (measured: child sees fds 0–3) | n/a | **yes** (measured: child sees extra fd) | n/a | none |
 | `MFD_EXEC` / `vm.memfd_noexec` awareness | yes, probed once, graceful pre-6.3 | no | no | yes (options + probe) | n/a |
-| payload sealing | default on (`SHRINK\|GROW\|WRITE`), granular `seals()` incl. `F_SEAL_FUTURE_WRITE`, opt-out | no | no | yes (option, default on) | n/a |
-| fallback filename source | library-generated (`uid-pid-128 bit rand`) — no user input in paths | n/a | **program name joined into path** — `/` in name is path traversal | n/a | n/a |
-| partial-write safe payload write | loop with `WriteZero` guard | single `write` | single `write` | n/a | n/a |
+| image sealing | default on (`SHRINK\|GROW\|WRITE`), granular `seals()` incl. `F_SEAL_FUTURE_WRITE`, opt-out | no | no | yes (option, default on) | n/a |
+| fallback filename source | library-generated (`uid-pid-128 bit rand`) — no user input in paths | n/a | **program name joined into path** — a `/` in the name writes outside the intended directory | n/a | n/a |
+| partial-write safe image write | loop with `WriteZero` guard | single `write` | single `write` | n/a | n/a |
 | fallback errno fidelity | real errno per directory | n/a | everything mapped to `PermissionDenied` | n/a | yes |
 
 ## API
@@ -51,7 +51,7 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | `prepare()` sealed-image reuse (repeat-spawn fast path) | **yes** | no | no | n/a |
 | `memfd_path()` accessor | yes | no | no | yes (`as_path_*`, #69) |
 | `Stdio` from `File`/fd | yes (`From<File>`, `From<FileDesc>`, type exported) | Fd variant unreachable | Fd variant unreachable | n/a |
-| redacted `Debug` (no payload dump) | yes | no (derives) | no (derives) | n/a |
+| redacted `Debug` (no image dump) | yes | no (derives) | no (derives) | n/a |
 | `exec()` replace-self API | yes | yes | yes | n/a |
 | pidfd spawn (`CLONE_PIDFD\|CLONE_VFORK`) | **yes** (5.3+; fork fallback) + `Child::pidfd()` poll-able | no | no | n/a |
 | PID-reuse-immune kill/wait | **yes** (`pidfd_send_signal` / `waitid(P_PIDFD)`) | no | no | n/a |
@@ -64,8 +64,8 @@ Bench/sizes measured 2026-09-10 on x86_64, Linux 6.18, rustc 1.98.
 | | memfd-ng | novafacing | VHSgunzo fork | memfd-rs |
 | --- | --- | --- | --- | --- |
 | binary size (minimal driver, stripped release) | **409 KB** | n/m | 465 KB | n/m |
-| spawn, cold payload (300-iter, static exit-0 fixture) | **~552 µs** | n/m | ~606 µs | n/m |
-| spawn, re-used payload | **~275 µs** (fork has no equivalent) | n/m | ~580 µs | n/m |
+| spawn, cold image (300-iter, static exit-0 fixture) | **~552 µs** | n/m | ~606 µs | n/m |
+| spawn, re-used image | **~275 µs** (fork has no equivalent) | n/m | ~580 µs | n/m |
 | std control | ~188 µs | | | |
 | tests | 80+ tests: std-as-oracle differential suite, pidfd/poll, process groups, granular seals, hugetlb, O_TMPFILE A/B, protocol fuzzer (10 000+ deterministic cases), CLI end-to-end, C FFI from Rust and real C; cc-built real static+dynamic fixtures; 136-byte hand-assembled ELF; feature-gated forced-rung tests | clang-dependent tests | clang-dependent tests (skip without clang) | unit tests |
 | build without clang | yes | lib yes / tests no | lib yes / tests no | yes |

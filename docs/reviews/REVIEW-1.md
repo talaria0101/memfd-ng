@@ -8,7 +8,7 @@ green after fixes.
 
 | # | finding | disposition |
 | --- | --- | --- |
-| R1-1 | `#[derive(Debug)]` on `MemFdExecutable` prints the entire payload — a prepared 9 MiB image lands in logs verbatim | fixed: manual `Debug` redacts `code` to `[N bytes]`; regression-proofed by keeping the struct non-derive |
+| R1-1 | `#[derive(Debug)]` on `MemFdExecutable` prints the entire image — a prepared 9 MiB image lands in logs verbatim | fixed: manual `Debug` redacts `code` to `[N bytes]`; regression-proofed by keeping the struct non-derive |
 | R1-2 | non-UTF-8 program name became `""` via `to_str().unwrap_or_default()` — silent loss, empty memfd name | fixed: `to_string_lossy()` preserves information; lossy text is what `/proc` consumers want anyway |
 | R1-3 | `unsafe impl Send/Sync for Argv` redundant — `Vec<CString>` is already `Send + Sync` | removed |
 | R1-4 | README did not state the NUL-rejection discipline | fixed: properties section now names it |

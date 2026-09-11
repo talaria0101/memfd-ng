@@ -13,7 +13,7 @@ fn cstr(s: &str) -> CString {
     CString::new(s).unwrap()
 }
 
-fn payload_of(path: &str) -> (Vec<u8>, usize) {
+fn image_of(path: &str) -> (Vec<u8>, usize) {
     let bytes = std::fs::read(path).unwrap();
     let len = bytes.len();
     (bytes, len)
@@ -40,7 +40,7 @@ fn abi_version_and_version_string() {
 
 #[test]
 fn spawn_wait_round_trip_exit_code() {
-    let (code, len) = payload_of("/bin/sh");
+    let (code, len) = image_of("/bin/sh");
     let name = cstr("ffi-sh");
     let argv = c_argv(&["sh", "-c", "exit 7"]);
     let mut status: i32 = -1;
@@ -63,7 +63,7 @@ fn spawn_wait_round_trip_exit_code() {
 
 #[test]
 fn null_argv_and_envp_use_defaults() {
-    let (code, len) = payload_of("/bin/sh");
+    let (code, len) = image_of("/bin/sh");
     let name = cstr("ffi-sh-defaults");
     let argv = c_argv(&["-c", "echo $HOME-from-default-argv0; exit 0"]);
     // argv NULL: program name becomes argv[0]
@@ -91,7 +91,7 @@ fn null_argv_and_envp_use_defaults() {
 
 #[test]
 fn kill_then_wait_reports_signal() {
-    let (code, len) = payload_of("/bin/sh");
+    let (code, len) = image_of("/bin/sh");
     let name = cstr("ffi-kill");
     let argv = c_argv(&["sh", "-c", "sleep 30"]);
     let mut status: i32 = -1;
@@ -108,7 +108,7 @@ fn kill_then_wait_reports_signal() {
 
 #[test]
 fn errors_are_negated_errnos() {
-    // corrupt payload: exec fails with ENOEXEC -> spawn returns NULL, -8
+    // corrupt image: exec fails with ENOEXEC -> spawn returns NULL, -8
     let bogus = b"\x7fELF-nope".to_vec();
     let name = cstr("ffi-bogus");
     let mut status: i32 = -1;
@@ -122,7 +122,7 @@ fn errors_are_negated_errnos() {
 
 #[test]
 fn free_without_wait_releases_the_handle() {
-    let (code, len) = payload_of("/bin/sh");
+    let (code, len) = image_of("/bin/sh");
     let name = cstr("ffi-free");
     let argv = c_argv(&["sh", "-c", "sleep 30"]);
     let mut status: i32 = -1;

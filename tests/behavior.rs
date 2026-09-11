@@ -17,7 +17,7 @@ use memfd_ng::{MemFdExecutable, Stdio};
 #[test]
 fn memfd_name_visible_in_child() {
     let _guard = common::serial();
-    // the payload name must reach /proc/<pid>/exe as /memfd:<name>
+    // the image name must reach /proc/<pid>/exe as /memfd:<name>
     let out = MemFdExecutable::new("ng-name-probe", &std::fs::read("/usr/bin/readlink").unwrap())
         .arg("/proc/self/exe")
         .stdout(Stdio::MakePipe)
@@ -31,7 +31,7 @@ fn memfd_name_visible_in_child() {
 }
 
 #[test]
-fn payload_fd_not_leaked_into_children() {
+fn image_fd_not_leaked_into_children() {
     let _guard = common::serial();
     // MFD_CLOEXEC: the child must see exactly the std stdio set (0-3)
     let out = MemFdExecutable::new("stub", stub_code())
@@ -87,7 +87,7 @@ fn sealing_is_applied_and_visible() {
     assert_eq!(
         bits & (SEAL_SHRINK | SEAL_GROW | SEAL_WRITE),
         SEAL_SHRINK | SEAL_GROW | SEAL_WRITE,
-        "payload not fully sealed"
+        "image not fully sealed"
     );
 
     // and the sealed image still executes
@@ -126,7 +126,7 @@ fn prepared_spawn_reuses_the_image() {
         assert_eq!(st.code(), Some(0), "iteration {i}");
     }
     let path_after = exe.memfd_path().unwrap();
-    assert_eq!(path_before, path_after, "spawn should not rewrite the payload");
+    assert_eq!(path_before, path_after, "spawn should not rewrite the image");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! Raw syscall layer: memfd creation (ordinary or hugetlb) with a capability
-//! ladder, payload sealing, a three-rung exec ladder, pidfd-based child
+//! ladder, image sealing, a three-rung exec ladder, pidfd-based child
 //! handling, and the CLOEXEC-pipe protocol that carries the real errno (or a
 //! fallback-file path) from the forked child back to the parent.
 //!
@@ -126,7 +126,7 @@ pub fn proc_available() -> bool {
 /// `vm.memfd_noexec` enforcement modes keep working; on older kernels the
 /// creation falls back to `MFD_CLOEXEC` and the kernel default. When
 /// `allow_sealing` is true and the kernel supports it, `MFD_ALLOW_SEALING`
-/// is added so the payload can be sealed once fully written.
+/// is added so the image can be sealed once fully written.
 pub fn memfd_create(name: *const libc::c_char, allow_sealing: bool) -> Result<libc::c_int> {
     let mut flags = MFD_CLOEXEC;
     if probe_flag(MFD_EXEC, &EXEC_BIT) {
@@ -177,7 +177,7 @@ pub fn hugetlb_page_size(fd: libc::c_int) -> Option<i64> {
 }
 
 /// Seal a memfd against the given `F_SEAL_*` bits. Returns false when the
-/// kernel has no sealing support (the payload still runs, it just stays
+/// kernel has no sealing support (the image still runs, it just stays
 /// modifiable through writable fds).
 pub fn add_seals(fd: libc::c_int, seals: libc::c_int) -> bool {
     unsafe { libc::fcntl(fd, F_ADD_SEALS, seals) == 0 }
@@ -196,7 +196,7 @@ pub fn write_all(fd: libc::c_int, mut buf: &[u8]) -> Result<()> {
     while !buf.is_empty() {
         let n = cvt_r_ssize(|| unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) })?;
         if n == 0 {
-            return Err(Error::new(ErrorKind::WriteZero, "failed to write payload"));
+            return Err(Error::new(ErrorKind::WriteZero, "failed to write image"));
         }
         buf = &buf[n..];
     }
@@ -499,7 +499,7 @@ pub unsafe fn exec_fd(
     }
 
     // Both fd rungs declined for environmental reasons. Raw ENOSYS is the
-    // exhaustion marker (never a payload verdict — real ENOEXEC etc. returned
+    // exhaustion marker (never an image verdict — real ENOEXEC etc. returned
     // above), allocation-free for the forked child.
     Err(Error::from_raw_os_error(libc::ENOSYS))
 }
@@ -634,7 +634,7 @@ impl NamedPath {
     }
 }
 
-/// A payload staged on an executable filesystem.
+/// An image staged on an executable filesystem.
 pub struct TmpfsPayload {
     /// Read-only fd to feed the exec ladder, or -1 when only the named rung
     /// exists (no procfs to reopen through). The write fd is always closed
@@ -648,7 +648,7 @@ pub struct TmpfsPayload {
     pub named: Option<NamedPath>,
 }
 
-/// Create and fill a payload file on an executable filesystem.
+/// Create and fill an image file on an executable filesystem.
 ///
 /// With procfs available the write fd is swapped for a read-only one. The
 /// name (when one was linked) is reported to the parent, which unlinks it as
@@ -725,7 +725,7 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
             let cpath = path.as_ptr() as *const libc::c_char;
 
             // O_TMPFILE first (Linux 3.11+ on supporting filesystems): the
-            // payload's write phase then happens in an inode with no name at
+            // image's write phase then happens in an inode with no name at
             // all — a crash mid-write leaves nothing behind.
             if !hook_disabled(b"MEMFD_NG_TEST_NO_OTMPFILE\0") {
                 let fd = libc::open(
@@ -785,7 +785,7 @@ pub fn tmpfs_payload(code: &[u8]) -> Result<TmpfsPayload> {
                         // No procfs: link the anonymous inode into place so
                         // the named rung can exec it — the /proc-less linkat
                         // dance. Needs CAP_DAC_READ_SEARCH; without it this
-                        // fails closed into named staging below. The payload
+                        // fails closed into named staging below. The image
                         // gains a name only at the moment it must be execed
                         // by name, and the write handle is closed first so
                         // the named exec cannot hit ETXTBSY.
@@ -959,7 +959,7 @@ fn pipe_write_all(pipe: libc::c_int, mut buf: &[u8]) {
 
 /// Read one message from the CLOEXEC pipe, looping over EINTR.
 ///
-/// Wire shapes (headers are read 6 bytes at a time so the PATH payload is
+/// Wire shapes (headers are read 6 bytes at a time so the PATH image is
 /// never overshot):
 /// - failure: `[4B errno BE]["NOEX"]` — 8 bytes
 /// - named path: `[2B len BE]["PATH"] + len bytes`

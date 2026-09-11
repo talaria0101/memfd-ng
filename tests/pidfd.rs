@@ -169,7 +169,7 @@ fn vfork_suspension_does_not_corrupt_the_parent() {
     // writes land in a private COW copy. Give it a big argv so the child's
     // own pre-exec activity has plenty of surface, and verify the parent's
     // own memory and the child's behavior afterwards.
-    let args: Vec<String> = (0..200).map(|i| format!("payload-{i}-{}", "x".repeat(50))).collect();
+    let args: Vec<String> = (0..200).map(|i| format!("image-{i}-{}", "x".repeat(50))).collect();
     let expected = args.join(" ");
     let mut exe = MemFdExecutable::new("vfork-integrity", stub_code());
     exe.arg("print").args(&args);
@@ -187,7 +187,7 @@ fn vfork_suspension_does_not_corrupt_the_parent() {
                 let mut exe = MemFdExecutable::new("vfork-threads", stub_code());
                 exe.arg("print").args(args.iter().take(50));
                 let out = exe.stdout(Stdio::MakePipe).output().unwrap();
-                assert!(out.stdout.starts_with(b"payload-0-"));
+                assert!(out.stdout.starts_with(b"image-0-"));
                 assert_eq!(out.status.code(), Some(0), "thread {i}");
             })
         })

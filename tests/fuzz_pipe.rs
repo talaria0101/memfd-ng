@@ -1,7 +1,7 @@
 //! Structure-aware fuzzing of the CLOEXEC-pipe protocol (roadmap item 8):
 //! `pipe_read` is the one place untrusted-shape bytes are parsed. The
 //! generator emits well-formed frames, truncations, bitflips, junk, and
-//! boundary-length payloads through real OS pipes; the reader must answer
+//! boundary-length images through real OS pipes; the reader must answer
 //! with the exact message, `InvalidData`, or a clean EOF — never a panic,
 //! a wrong decode, a hang, or an unexpected error kind.
 //!
@@ -30,7 +30,7 @@ impl Xorshift {
     }
 }
 
-/// One pipe pair with the write end parked on a thread so oversized payloads
+/// One pipe pair with the write end parked on a thread so oversized images
 /// can never deadlock the test.
 struct Pipe {
     read_fd: libc::c_int,
@@ -50,14 +50,14 @@ impl Pipe {
         }
     }
 
-    /// Park the write end on a thread; `payload` is written in chunks of
+    /// Park the write end on a thread; `image` is written in chunks of
     /// `chunk` bytes, then the write end closes (the reader sees EOF after
-    /// the payload).
-    fn write_on_thread(&mut self, payload: Vec<u8>, chunk: usize) {
+    /// the image).
+    fn write_on_thread(&mut self, image: Vec<u8>, chunk: usize) {
         let wfd = self.write_fd;
         self.write_fd = -1;
         self.writer = Some(std::thread::spawn(move || {
-            for piece in payload.chunks(chunk.max(1)) {
+            for piece in image.chunks(chunk.max(1)) {
                 let mut off = 0;
                 while off < piece.len() {
                     let n = unsafe {
@@ -191,7 +191,7 @@ fn named_path_frames_round_trip_exactly() {
         let mut pipe = Pipe::new();
         pipe.write_on_thread(path_frame(&path), 6);
         match expect_msg(pipe.read_one()) {
-            PipeMsg::NamedPath(got) => assert_eq!(got, path, "PATH payload len {len} garbled"),
+            PipeMsg::NamedPath(got) => assert_eq!(got, path, "PATH image len {len} garbled"),
             other => panic!("expected NamedPath({len}), got {other:?}"),
         }
     }
@@ -201,13 +201,13 @@ fn named_path_frames_round_trip_exactly() {
 fn real_world_sequence_named_path_then_failure() {
     // What the child actually sends in the no-procfs corner when exec fails:
     // NamedPath first, then the errno, then EOF.
-    let payload = b"/tmp/.memfd-ng-0-0-deadbeef".to_vec();
-    let mut frame = path_frame(&payload);
+    let image = b"/tmp/.memfd-ng-0-0-deadbeef".to_vec();
+    let mut frame = path_frame(&image);
     frame.extend_from_slice(&errno_frame(8 /* ENOEXEC */));
     let mut pipe = Pipe::new();
     pipe.write_on_thread(frame, 4);
     match expect_msg(pipe.read_one()) {
-        PipeMsg::NamedPath(got) => assert_eq!(got, payload),
+        PipeMsg::NamedPath(got) => assert_eq!(got, image),
         other => panic!("expected NamedPath, got {other:?}"),
     }
     match expect_msg(pipe.read_one()) {
@@ -239,19 +239,19 @@ fn truncations_reject_or_degrade_never_misdecode() {
         }
     }
     // every strict prefix of a valid path frame
-    let payload = b"/tmp/.memfd-ng-1-2-abcdef";
-    let frame = path_frame(payload);
+    let image = b"/tmp/.memfd-ng-1-2-abcdef";
+    let frame = path_frame(image);
     for cut in 0..frame.len() {
         let mut pipe = Pipe::new();
         pipe.write_on_thread(frame[..cut].to_vec(), 64);
         match classify(pipe.read_one()) {
             Outcome::Msg(PipeMsg::NamedPath(got)) => {
-                // a short payload degrades to a shorter path, never a lie
+                // a short image degrades to a shorter path, never a lie
                 // about the header: the reader takes what arrived
                 assert!(cut >= 6, "header-only cut decoded as NamedPath at cut={cut}");
                 let claimed = u16::from_be_bytes([frame[0], frame[1]]) as usize;
                 let available = cut - 6;
-                let expect = payload[..available.min(claimed)].to_vec();
+                let expect = image[..available.min(claimed)].to_vec();
                 assert_eq!(got, expect, "truncated PATH at cut={cut}");
             }
             Outcome::Msg(PipeMsg::Success) => assert_eq!(cut, 0),
@@ -267,8 +267,8 @@ fn truncations_reject_or_degrade_never_misdecode() {
 fn header_smuggles_never_decode_across_shapes() {
     // A PATH header's bytes [2..6] spell PATH; an errno frame's [2..6] are
     // errno bytes + "NO". Prove the shapes cannot collide: feed a PATH frame
-    // whose declared payload is present — the reader must take the PATH
-    // interpretation; feed the same bytes missing the payload — it must not
+    // whose declared image is present — the reader must take the PATH
+    // interpretation; feed the same bytes missing the image — it must not
     // claim a Failure with a fabricated errno.
     let mut evil = path_frame(b"x");
     evil[0] = 0;
@@ -322,13 +322,13 @@ fn bitflipped_valid_frames_stay_legal() {
 #[test]
 fn byte_by_byte_writes_reassemble() {
     // the header loop must accumulate across partial writes
-    let payload = b"/tmp/.memfd-ng-slow-writer";
-    let mut frame = path_frame(payload);
+    let image = b"/tmp/.memfd-ng-slow-writer";
+    let mut frame = path_frame(image);
     frame.extend_from_slice(&errno_frame(7 /* E2BIG */));
     let mut pipe = Pipe::new();
     pipe.write_on_thread(frame, 1);
     match expect_msg(pipe.read_one()) {
-        PipeMsg::NamedPath(got) => assert_eq!(got, &payload[..]),
+        PipeMsg::NamedPath(got) => assert_eq!(got, &image[..]),
         other => panic!("got {other:?}"),
     }
     match expect_msg(pipe.read_one()) {

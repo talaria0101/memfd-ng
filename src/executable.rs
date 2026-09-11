@@ -89,12 +89,13 @@ impl std::ops::Not for SealFlags {
 /// `process::Command` struct; the one difference is that the executable's
 /// bytes are supplied by the caller instead of a filesystem path.
 ///
-/// The payload lands in a `memfd_create(2)` file, is sealed against
+/// The image lands in a `memfd_create(2)` file, is sealed against
 /// modification when the kernel allows, and is executed with
-/// `execveat(2)`/`AT_EMPTY_PATH` — never touching disk. Kernels or emulation
-/// layers without fd-based exec get a silent, allocation-free tmpfs ladder
-/// (`XDG_RUNTIME_DIR` → tmp dir → `/dev/shm` → `~/.cache`), each candidate
-/// checked against `ST_NOEXEC` first.
+/// `execveat(2)`/`AT_EMPTY_PATH` — no file on disk is needed. Kernels or
+/// emulation layers without fd-based exec get an allocation-free tmpfs
+/// ladder that never writes to stderr (`XDG_RUNTIME_DIR` → tmp dir →
+/// `/dev/shm` → `~/.cache`), each candidate checked against `ST_NOEXEC`
+/// first.
 ///
 /// # Examples
 ///
@@ -145,7 +146,7 @@ pub struct MemFdExecutable<'a> {
     sealed: bool,
     /// Which seals to apply (default: SHRINK | GROW | WRITE)
     seal_flags: SealFlags,
-    /// Stage the payload on hugetlbfs instead of an ordinary memfd
+    /// Stage the image on hugetlbfs instead of an ordinary memfd
     hugetlb: bool,
     /// Run the child in a new session (setsid(2))
     setsid: bool,
@@ -166,7 +167,7 @@ struct Argv(Vec<CString>);
 
 impl std::fmt::Debug for MemFdExecutable<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // redact the payload: Debug on a prepared 9 MiB image would otherwise
+        // redact the image: Debug on a prepared 9 MiB image would otherwise
         // dump the whole thing into logs
         f.debug_struct("MemFdExecutable")
             .field("code", &format!("[{} bytes]", self.code.len()))
@@ -219,7 +220,7 @@ impl<'a> MemFdExecutable<'a> {
     /// the name of the program, and becomes the memfd name (the child's
     /// `/proc/<pid>/exe` shows `/memfd:<name>`); the first argv entry stays
     /// this name too, so use `set_program` if the program needs a specific
-    /// argv\[0\] distinct from the payload name.
+    /// argv\[0\] distinct from the image name.
     ///
     /// # Examples
     ///
@@ -422,14 +423,14 @@ impl<'a> MemFdExecutable<'a> {
         self
     }
 
-    /// Create the memfd now: write the payload and, when the kernel supports
+    /// Create the memfd now: write the image and, when the kernel supports
     /// it, seal it against the configured [`SealFlags`] (default: shrink,
     /// grow and write).
     ///
-    /// Spawning prepares the payload anyway, but calling this once makes
+    /// Spawning prepares the image anyway, but calling this once makes
     /// every later `spawn()` skip the write entirely: the sealed image is
     /// executed in place, which is the fast path for programs that spawn the
-    /// same payload repeatedly. Sealing also means nobody with a writable fd
+    /// same image repeatedly. Sealing also means nobody with a writable fd
     /// (including our own children) can swap the code between spawns.
     ///
     /// Preparing again simply replaces the previous image.
@@ -458,8 +459,8 @@ impl<'a> MemFdExecutable<'a> {
         Ok(self)
     }
 
-    /// Prepare the payload on hugetlbfs: create with `MFD_HUGETLB`, then pad
-    /// the payload up to the huge-page size (hugetlbfs refuses unaligned
+    /// Prepare the image on hugetlbfs: create with `MFD_HUGETLB`, then pad
+    /// the image up to the huge-page size (hugetlbfs refuses unaligned
     /// sizes with `EINVAL`; loaders ignore bytes past the last PT_LOAD, so
     /// zero padding does not change the program). Err means degrade to the
     /// ordinary memfd path.
@@ -486,7 +487,7 @@ impl<'a> MemFdExecutable<'a> {
             return Err(Error::from_raw_os_error(libc::EIO));
         }
         // Sealing is refused on hugetlbfs (EPERM, observed on 6.18); the
-        // payload runs unsealed, and is_sealed() reports that honestly.
+        // image runs unsealed, and is_sealed() reports that honestly.
         let sealed =
             self.sealed && self.seal_flags.bits() != 0 && sys::add_seals(fd, self.seal_flags.bits());
         self.prepared = Some(Prepared {
@@ -497,26 +498,26 @@ impl<'a> MemFdExecutable<'a> {
         Ok(())
     }
 
-    /// Whether a payload is already prepared (see [`prepare`]).
+    /// Whether an image is already prepared (see [`prepare`]).
     pub fn is_prepared(&self) -> bool {
         self.prepared.is_some()
     }
 
-    /// Whether the prepared payload (if any) ended up sealed.
+    /// Whether the prepared image (if any) ended up sealed.
     pub fn is_sealed(&self) -> bool {
         self.prepared.as_ref().map(|p| p.sealed).unwrap_or(false)
     }
 
-    /// Whether the prepared payload (if any) lives on hugetlbfs. Only true
+    /// Whether the prepared image (if any) lives on hugetlbfs. Only true
     /// when `hugetlb(true)` was set AND the kernel accepted the facility;
-    /// otherwise the payload degraded to an ordinary memfd.
+    /// otherwise the image degraded to an ordinary memfd.
     pub fn is_hugetlb(&self) -> bool {
         self.prepared.as_ref().map(|p| p.hugetlb).unwrap_or(false)
     }
 
-    /// Toggle payload sealing. Sealing is on by default; kernels without
-    /// sealing support silently skip it. Changing this invalidates any
-    /// prepared image: the next spawn (or `prepare`) stages a fresh payload
+    /// Toggle image sealing. Sealing is on by default; kernels without
+    /// sealing support skip it without surfacing an error. Changing this invalidates any
+    /// prepared image: the next spawn (or `prepare`) stages a fresh image
     /// under the new setting.
     pub fn sealed(&mut self, on: bool) -> &mut Self {
         if self.sealed != on {
@@ -526,7 +527,7 @@ impl<'a> MemFdExecutable<'a> {
         self
     }
 
-    /// Choose exactly which seals land on the prepared payload. The default
+    /// Choose exactly which seals land on the prepared image. The default
     /// is [`SealFlags::full()`]; pass e.g. `SealFlags::FUTURE_WRITE` to keep
     /// already-open writable handles working while blocking new writes, or
     /// `SealFlags::default()` (no bits) to keep the memfd sealable without
@@ -540,13 +541,13 @@ impl<'a> MemFdExecutable<'a> {
         self
     }
 
-    /// Prefer staging the payload on hugetlbfs (`MFD_HUGETLB`, kernel 4.14+)
-    /// instead of an ordinary memfd. Intended for very large payloads on
+    /// Prefer staging the image on hugetlbfs (`MFD_HUGETLB`, kernel 4.14+)
+    /// instead of an ordinary memfd. Intended for very large images on
     /// machines with preallocated huge pages. Every hugetlb failure degrades
     /// to an ordinary memfd, so a spawn never fails *because of* this
     /// setting; check [`is_hugetlb`] after `prepare()` to see what actually
     /// happened. Note that kernels refuse to seal hugetlb memfds, so a
-    /// hugetlb payload is unsealed even under `sealed(true)`. Changing this
+    /// hugetlb image is unsealed even under `sealed(true)`. Changing this
     /// invalidates any prepared image.
     pub fn hugetlb(&mut self, on: bool) -> &mut Self {
         if self.hugetlb != on {
@@ -620,7 +621,7 @@ impl<'a> MemFdExecutable<'a> {
         let (ours, theirs) = self.setup_io(Stdio::Inherit, true)?;
         let (input, output) = anon_pipe()?;
 
-        // Prepare the payload in the parent so the forked child only has to
+        // Prepare the image in the parent so the forked child only has to
         // call exec. A kernel without memfd support is not fatal: the child
         // falls back to the tmpfs ladder on its own.
         let memfd_fd = match self.ensure_prepared() {
@@ -937,7 +938,7 @@ impl<'a> MemFdExecutable<'a> {
         self.tmpfs_fallback(argv.as_ptr(), envp, pipe_fd)
     }
 
-    /// Write the payload to an executable tmpfs file and exec it. Runs in the
+    /// Write the image to an executable tmpfs file and exec it. Runs in the
     /// forked child; never writes to stderr — failures travel back to the
     /// parent through the CLOEXEC pipe as real errnos.
     fn tmpfs_fallback(
@@ -946,22 +947,22 @@ impl<'a> MemFdExecutable<'a> {
         envp: *const *const libc::c_char,
         pipe_fd: c_int,
     ) -> Result<()> {
-        let payload = sys::tmpfs_payload(self.code)?;
+        let image = sys::tmpfs_payload(self.code)?;
 
         // No-procfs corner: the name is the final rung and the parent owns
         // the cleanup, so hand it over before execing.
-        if let Some(path) = &payload.named {
+        if let Some(path) = &image.named {
             if pipe_fd >= 0 {
                 sys::pipe_write_named_path(pipe_fd, path.as_bytes());
             }
         }
 
-        if payload.fd >= 0 {
-            match unsafe { sys::exec_fd(payload.fd, argv, envp) } {
+        if image.fd >= 0 {
+            match unsafe { sys::exec_fd(image.fd, argv, envp) } {
                 Err(err) if fd_rung_exhausted(&err) => {
                     // Both fd rungs refused; without procfs there is no
                     // named rung left, so surface the real verdict.
-                    if payload.named.is_none() {
+                    if image.named.is_none() {
                         return Err(err);
                     }
                 }
@@ -969,7 +970,7 @@ impl<'a> MemFdExecutable<'a> {
             }
         }
 
-        match &payload.named {
+        match &image.named {
             Some(path) => unsafe { sys::exec_path(path.as_ptr(), argv, envp) },
             None => Err(Error::from_raw_os_error(libc::ENOSYS)),
         }
@@ -978,7 +979,7 @@ impl<'a> MemFdExecutable<'a> {
 
 /// True when both fd rungs declined for environmental reasons (no execveat /
 /// no procfs / exec forbidden), meaning a different backing file might still
-/// work. Real payload verdicts (ENOEXEC, EINVAL, ETXTBSY...) do not qualify.
+/// work. Real image verdicts (ENOEXEC, EINVAL, ETXTBSY...) do not qualify.
 /// ENOSYS doubles as the allocation-free "rungs exhausted" marker produced
 /// by `sys::exec_fd` itself.
 fn fd_rung_exhausted(err: &Error) -> bool {

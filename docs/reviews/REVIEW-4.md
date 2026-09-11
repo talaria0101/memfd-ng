@@ -8,7 +8,7 @@ Build + full suite green after fixes.
 
 | # | finding | disposition |
 | --- | --- | --- |
-| R4-1 | `sealed(false)` after `prepare()` left the old **sealed** image cached — subsequent spawns silently ran the sealed payload after the caller asked for unsealed | fixed: `sealed()` now invalidates the prepared cache when the setting actually changes; locked by `unsealing_after_prepare_invalidates_the_cache` |
+| R4-1 | `sealed(false)` after `prepare()` left the old **sealed** image cached — subsequent spawns silently ran the sealed image after the caller asked for unsealed | fixed: `sealed()` now invalidates the prepared cache when the setting actually changes; locked by `unsealing_after_prepare_invalidates_the_cache` |
 | R4-2 | `std::os::fd` paths in `child.rs` require Rust 1.66, but the crate claims MSRV 1.64 | fixed: `std::os::unix::io` aliases (stable since 1.0); keeps the MSRV claim honest |
 | R4-3 | fork-failure path: `do_fork()?` returns with both pipe fds and `StdioPipes` alive | verified: all are locals with `Drop`, nothing leaks; no child exists so nothing to reap |
 | R4-4 | fd exhaustion (`EMFILE`) mid-spawn | verified fail-closed: probe/create/open errors propagate, `spawn` returns `Err`, tmpfs ladder walks to the next directory on per-dir `EMFILE` |

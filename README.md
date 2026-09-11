@@ -2,8 +2,8 @@
 
 Execute ELF binaries straight from memory. Put the bytes of a Linux
 executable in a `&[u8]` — `include_bytes!()`, a socket, a compiler — and
-`MemFdExecutable` runs them without the file ever landing on disk, through an
-interface shaped like `std::process::Command`.
+`MemFdExecutable` runs them straight from an anonymous in-memory file,
+through an interface shaped like `std::process::Command`.
 
 ```rust
 use memfd_ng::{MemFdExecutable, Stdio};
@@ -23,7 +23,7 @@ assert_eq!(out.status.code(), Some(7));
 ## How a spawn executes
 
 ```
-payload bytes
+image bytes
      │
      ▼
 memfd_create(MFD_CLOEXEC │ MFD_EXEC? │ MFD_ALLOW_SEALING?)   ← probed once per process
@@ -36,7 +36,8 @@ rung 2: execve("/proc/self/fd/N")            3.17/3.18, procfs only
 rung 3: tmpfs ladder → named exec            emulators, ancient kernels
 ```
 
-Every rung after a refused `execveat` is silent and allocation-free in the
+Every rung after a refused `execveat` runs without writing anything to
+stderr (captured output is never polluted) and stays allocation-free in the
 forked child (stack buffers and raw syscalls only — argv/envp are built
 before the fork, so the child never depends on a malloc lock another thread
 may hold).
@@ -55,7 +56,7 @@ no helper processes, no sleeps, no races.
 
 - **std Command discipline.** Arguments or environment values containing NUL
   bytes are rejected with `InvalidInput`, exactly as std does; `Debug` never
-  dumps the payload. An unmodified command inherits the parent environment
+  dumps the image. An unmodified command inherits the parent environment
   wholesale, exactly like std.
 - **Errno fidelity.** A failed exec surfaces from `spawn()`/`status()`/
   `output()` as a real `std::io::Error` with the kernel's own errno
@@ -63,13 +64,13 @@ no helper processes, no sleeps, no races.
   never panics and never prints.
 - **Quiet by construction.** The library writes nothing to stderr — captured
   output is never polluted.
-- **No fd leaks.** The payload memfd carries `MFD_CLOEXEC`; children see
+- **No fd leaks.** The image memfd carries `MFD_CLOEXEC`; children see
   exactly the std stdio set; pidfds are closed with the `Child`.
-- **Sealed payloads.** Written payloads are sealed against shrink, grow and
+- **Sealed images.** Written images are sealed against shrink, grow and
   write by default (`SealFlags::full()`), so nothing can swap code between
   write and exec. `seals()` picks exact bits (including
   `F_SEAL_FUTURE_WRITE`); `sealed(false)` opts out entirely. Note: kernels
-  refuse to seal hugetlb memfds — a hugetlb payload runs unsealed.
+  refuse to seal hugetlb memfds — a hugetlb image runs unsealed.
 - **pidfd spawn, poll-able children.** Spawns use
   `clone3(CLONE_VFORK | CLONE_PIDFD)` on kernel 5.3+ (plain `fork()`
   otherwise). The parent is suspended until the child execs — the child runs
@@ -80,8 +81,8 @@ no helper processes, no sleeps, no races.
   `kill`/`wait`/`try_wait` go through `pidfd_send_signal`/`waitid(P_PIDFD)`
   and are PID-reuse-immune, with the classic `kill`/`waitpid` as fallback.
 - **`vm.memfd_noexec`-aware.** `MFD_EXEC` (kernel 6.3+) is probed once and
-  used when supported, so enforcement modes keep working; older kernels fall
-  back gracefully.
+  used when supported, so kernels configured to restrict memfd execution
+  keep enforcing that; older kernels fall back gracefully.
 - **Repeat-spawn fast path.** `prepare()` writes and seals once; every later
   spawn re-executes the sealed image without rewriting it.
 - **Process-group knobs.** `setsid()` and `process_group(pgid)` run in the
@@ -90,8 +91,8 @@ no helper processes, no sleeps, no races.
 
 ## Optional: hugetlb, CLI, C FFI
 
-- **`MFD_HUGETLB`** (`.hugetlb(true)`): stage the payload on hugetlbfs for
-  very large payloads (page-aligned via zero padding; loaders ignore bytes
+- **`MFD_HUGETLB`** (`.hugetlb(true)`): stage the image on hugetlbfs for
+  very large images (page-aligned via zero padding; loaders ignore bytes
   past the last `PT_LOAD`). Every hugetlb refusal degrades to an ordinary
   memfd — a spawn never fails *because of* the flag. `is_hugetlb()` reports
   what actually happened.
@@ -111,12 +112,12 @@ no helper processes, no sleeps, no races.
 | workload | µs/spawn |
 | --- | --- |
 | `std::process::Command` (control) | ~188 |
-| memfd-ng, payload written per spawn | ~552 |
+| memfd-ng, image written per spawn | ~552 |
 | memfd-ng, `prepare()` once, re-spawn | ~275 |
 
 Run-to-run variance is a few percent; the deltas are stable across runs.
 
-Writing the payload costs memory bandwidth; the prepared path halves the
+Writing the image costs memory bandwidth; the prepared path halves the
 per-spawn cost. `cargo build --release` size of a minimal driver linking the
 crate: ~409 KB stripped (profile: `opt-level = "z"`, LTO, one codegen unit).
 
@@ -154,7 +155,7 @@ system `cc` at test time (override with `MEMFD_NG_TEST_CC` for
 cross-environments), plus a hand-assembled 136-byte ELF64 that exits 42.
 `tests/fuzz_pipe.rs` structure-fuzzes the CLOEXEC-pipe protocol (2 000+
 deterministic junk/bitflip/truncation cases per run, boundary-length
-payloads, exact round-trips).
+images, exact round-trips).
 
 ## MSRV
 

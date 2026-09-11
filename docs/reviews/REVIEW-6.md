@@ -1,21 +1,21 @@
-# Review 6 — adversarial failure injection
+# Review 6 — failure-mode injection
 
-Pass: stop reading code, start breaking the environment. New committed tests
-drive real failure modes end to end (hostile mounts, dead directories, empty
-payloads, NUL arguments, 1000-argument vectors, `=`-bearing env values).
-Full suite green after fixes, five consecutive adversarial-suite runs clean.
+Pass: stop reading code, start stressing the environment. New committed tests
+drive real failure modes end to end (unusable mounts, dead directories, empty
+images, NUL arguments, 1000-argument vectors, `=`-bearing env values).
+Full suite green after fixes, five consecutive failure-mode runs clean.
 
-## New instruments (committed as `tests/adversarial.rs`)
+## New instruments (committed as `tests/adversarial.rs`, since renamed `tests/failure_modes.rs`)
 
 | # | injection | expected | result |
 | --- | --- | --- | --- |
 | R6-1 | `TMPDIR=/proc` + fallback forced — `/proc` is a **real noexec mount** on this host | `ST_NOEXEC` skip is exercised against a genuine mount, ladder lands on `/dev/shm`, nothing staged inside `/proc` | **pass** — the noexec-awareness claim is now proven live, not just read from `statfs` docs |
 | R6-2 | every env-controlled directory dead (`XDG_RUNTIME_DIR`, `TMPDIR`, `HOME` → `/nonexistent-*`) | ladder walks past them to `/dev/shm`, silent, no leftovers | pass |
-| R6-3 | empty payload | kernel's `ENOEXEC` from `status()`, no hang, no leftovers | pass |
+| R6-3 | empty image | kernel's `ENOEXEC` from `status()`, no hang, no leftovers | pass |
 | R6-4 | NUL byte in an argument | `InvalidInput` before any fork; tmpfs untouched | pass |
 | R6-5 | 1000-argument argv (plus sentinel) | verbatim round trip through argv construction and exec | pass |
 | R6-6 | environment value `a=b=c=d` | round trips through the `key=value` reconstruction | pass |
-| R6-7 | `sealed(false)` after `prepare()` | cache invalidated, fresh unsealed payload staged | pass (with the R4-1 fix) |
+| R6-7 | `sealed(false)` after `prepare()` | cache invalidated, fresh unsealed image staged | pass (with the R4-1 fix) |
 
 ## Test-suite defect found and fixed during injection
 

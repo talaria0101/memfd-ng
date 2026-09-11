@@ -2,8 +2,8 @@
 //!
 //! Compares memfd-ng against std::process::Command on identical workloads so
 //! the numbers are grounded in something external. The interesting columns:
-//! - cold payload: memfd written per spawn (the normal library path)
-//! - prepared payload: written and sealed once, then re-execed
+//! - cold image: memfd written per spawn (the normal library path)
+//! - prepared image: written and sealed once, then re-execed
 use std::io::Write;
 use std::process::Command;
 use std::time::Instant;

@@ -19,7 +19,7 @@ int32_t memfd_ng_abi_version(void);
 const char *memfd_ng_version(void);
 
 /*
- * Spawn the payload in a child process with inherited stdio.
+ * Spawn the image in a child process with inherited stdio.
  * - code/code_len: the executable image; must stay valid and unmodified
  *   until the child is waited on or freed.
  * - name: memfd/program name; NULL means "memfd-ng".

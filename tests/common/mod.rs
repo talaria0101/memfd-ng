@@ -25,7 +25,7 @@ fn target_tmpdir() -> PathBuf {
 }
 
 /// Compile `code` with the system cc. `static` produces a real static binary
-/// so tests exercise large payloads and non-trivial ELF layouts, not toy
+/// so tests exercise large images and non-trivial ELF layouts, not toy
 /// stubs. Returns the binary path.
 fn cc_build(name: &str, code: &str, link_static: bool) -> PathBuf {
     // Per-process fixture names: test binaries build fixtures in parallel and
@@ -155,7 +155,7 @@ pub fn dynamic_code() -> &'static Vec<u8> {
 }
 
 /// Hand-assembled x86_64 ELF64: 64-byte ehdr + 56-byte phdr + `exit(42)`.
-/// No toolchain, no libc, fully deterministic — the smallest real payload.
+/// No toolchain, no libc, fully deterministic — the smallest real image.
 #[cfg(target_arch = "x86_64")]
 pub const TINY_ELF_EXIT42: &[u8] = &[
     // ehdr

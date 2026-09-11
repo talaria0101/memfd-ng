@@ -14,7 +14,7 @@ int main(void) {
     }
     printf("smoke: linked against memfd-ng %s\n", memfd_ng_version());
 
-    /* payload: read a tiny shell script... no — read /bin/sh itself */
+    /* image: read a tiny shell script... no — read /bin/sh itself */
     FILE *f = fopen("/bin/sh", "rb");
     if (!f) { perror("fopen /bin/sh"); return 1; }
     fseek(f, 0, SEEK_END);
@@ -48,14 +48,14 @@ int main(void) {
     }
     printf("smoke: child exited 5 as instructed\n");
 
-    /* error path: corrupt payload must surface -ENOEXEC through err_out */
+    /* error path: corrupt image must surface -ENOEXEC through err_out */
     const unsigned char bogus[] = {0x7f, 'E', 'L', 'F', 'n', 'o', 'p', 'e'};
     memfd_ng_child *bad = memfd_ng_spawn(bogus, sizeof bogus, "smoke-bogus", argv, NULL, &err);
     if (bad != NULL || err != -ENOEXEC) {
         fprintf(stderr, "smoke: expected NULL/-ENOEXEC, got %p/%d\n", (void *)bad, err);
         return 1;
     }
-    printf("smoke: corrupt payload surfaced ENOEXEC\n");
+    printf("smoke: corrupt image surfaced ENOEXEC\n");
 
     printf("smoke: all ok\n");
     return 0;

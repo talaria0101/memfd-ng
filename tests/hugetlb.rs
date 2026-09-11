@@ -1,8 +1,8 @@
-//! `MFD_HUGETLB` option: the payload may be staged on hugetlbfs, and every
+//! `MFD_HUGETLB` option: the image may be staged on hugetlbfs, and every
 //! hugetlb refusal must degrade to an ordinary memfd — a spawn never fails
 //! *because of* hugetlb. Engagement is verified via fstatfs magic on the
 //! prepared memfd, never assumed from the builder flag.
-//! (x86_64-gated: the aligned-payload test hardcodes the 2 MiB huge size;
+//! (x86_64-gated: the aligned-image test hardcodes the 2 MiB huge size;
 //! the degrade contract also runs on every other target via the other tests.)
 
 #![cfg(target_arch = "x86_64")]
@@ -45,10 +45,10 @@ fn is_on_hugetlbfs(exe: &MemFdExecutable) -> Option<bool> {
 #[test]
 fn hugetlb_request_never_breaks_spawning() {
     let _guard = common::serial();
-    // Unaligned normal-size payload: this host has huge pages configured but
+    // Unaligned normal-size image: this host has huge pages configured but
     // none preallocated, so the write into hugetlbfs fails (ENOMEM) and the
     // contract says: degrade and run anyway. On hosts with free huge pages
-    // the payload engages hugetlbfs instead — both outcomes must run.
+    // the image engages hugetlbfs instead — both outcomes must run.
     let mut exe = MemFdExecutable::new("hugetlb-degrade", stub_code());
     exe.hugetlb(true);
     exe.prepare().unwrap();
@@ -65,10 +65,10 @@ fn hugetlb_request_never_breaks_spawning() {
 #[test]
 fn hugetlb_engaged_payload_is_verifiably_on_hugetlbfs() {
     let _guard = common::serial();
-    // Huge-page-aligned payload: the engagement path becomes possible. When
+    // Huge-page-aligned image: the engagement path becomes possible. When
     // engaged, fstatfs must show the hugetlbfs magic (proof, not promise);
     // when degraded (no free huge pages), the ordinary path must run the
-    // payload.
+    // image.
     let mut code = TINY_ELF_EXIT42.to_vec();
     code.resize(2 * 1024 * 1024, 0); // x86_64 default huge page size
 

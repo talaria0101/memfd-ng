@@ -1,5 +1,5 @@
-//! Adversarial failure-injection tests: hostile directory ladders, empty
-//! payloads, NUL rejection, argument volume. Each one drives a real failure
+//! Failure-mode injection tests: degraded directories, empty
+//! images, NUL rejection, argument volume. Each one drives a real failure
 //! mode end to end and asserts we fail closed with the kernel's own verdict.
 
 mod common;
@@ -69,7 +69,7 @@ fn tmpfs_ladder_walks_past_dead_directories() {
     drop(guard);
 }
 
-/// An empty payload is not an executable: the caller gets the kernel's
+/// An empty image is not an executable: the caller gets the kernel's
 /// ENOEXEC, never a hang, a panic, or a phantom success.
 #[test]
 fn empty_payload_fails_with_enoexec() {
@@ -128,7 +128,7 @@ fn environment_values_with_equals_signs_round_trip() {
 }
 
 /// `sealed(false)` after a `prepare()` must invalidate the cached image —
-/// the next spawn stages a fresh unsealed payload instead of silently
+/// the next spawn stages a fresh unsealed image instead of silently
 /// re-running the old sealed one.
 #[test]
 fn unsealing_after_prepare_invalidates_the_cache() {

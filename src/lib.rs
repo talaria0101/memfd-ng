@@ -1,20 +1,21 @@
 //! Execute ELF binaries straight from memory.
 //!
 //! Put the bytes of a Linux executable in a `&[u8]` — `include_bytes!()`,
-//! a socket, a compiler — and [`MemFdExecutable`] runs them without the file
-//! ever landing on disk:
+//! a socket, a compiler — and [`MemFdExecutable`] runs them straight from an
+//! anonymous in-memory file:
 //!
-//! - The payload is written to a `memfd_create(2)` file and executed with
+//! - The image is written to a `memfd_create(2)` file and executed with
 //!   `execveat(2)` + `AT_EMPTY_PATH` (no procfs required), falling back to
-//!   `execve("/proc/self/fd/N")`, and finally to a silent, allocation-free
+//!   `execve("/proc/self/fd/N")`, and finally to an allocation-free
 //!   tmpfs ladder for kernels or emulation layers without fd-based exec.
-//! - Prepared payloads are sealed (`F_SEAL_SHRINK | F_SEAL_GROW |
+//! - Prepared images are sealed (`F_SEAL_SHRINK | F_SEAL_GROW |
 //!   `F_SEAL_WRITE`) so nothing can swap the code between the write and the
 //!   exec, and repeated spawns reuse the sealed image without rewriting it
 //!   (see [`MemFdExecutable::prepare`]).
 //! - The memfd carries `MFD_CLOEXEC` and `MFD_EXEC` where the kernel
-//!   supports them, so the payload fd is visible to the executing child and
-//!   to nothing else, and `vm.memfd_noexec` enforcement modes keep working.
+//!   supports them, so the image fd is visible to the executing child and
+//!   to nothing else, and kernels configured to restrict memfd execution
+//!   keep enforcing that.
 //! - Failures surface as real `std::io::Error` values with the operating
 //!   system's own errno, from `spawn()`/`status()`/`output()` just like
 //!   `std::process`. The library never writes to stderr.

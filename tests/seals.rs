@@ -93,7 +93,7 @@ fn write_seal_blocks_new_writes() {
         exe.prepare().unwrap();
         let path = exe.memfd_path().unwrap();
         let mut probe = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        let res = probe.write_all(b"MALICIOUS-PATCH");
+        let res = probe.write_all(b"PATCH-BYTES");
         assert!(res.is_err(), "{flags:?} must block post-seal writes");
     }
 }
@@ -130,9 +130,9 @@ fn changing_seals_invalidates_the_prepared_image() {
 #[test]
 fn sealed_payload_survives_child_write_attempts() {
     let _guard = common::serial();
-    // A prepared+sealed payload must be immutable even from children of the
+    // A prepared+sealed image must be immutable even from children of the
     // sealed image itself: the stub opens /proc/self/exe for writing.
-    // (Needs the payload to try: use the stub's cat mode on its own exe is
+    // (Needs the image to try: use the stub's cat mode on its own exe is
     // read-only, so instead assert the parent-side contract: no writable fd
     // of ours can change the image.)
     let mut exe = MemFdExecutable::new("seals-immutable", stub_code());

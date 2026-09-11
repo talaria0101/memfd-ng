@@ -8,7 +8,7 @@
 //! # Ownership contract
 //!
 //! - `code` must stay valid and unmodified from `memfd_ng_spawn` until the
-//!   child has been waited on or freed: the payload is staged into a sealed
+//!   child has been waited on or freed: the image is staged into a sealed
 //!   memfd at spawn time, but a no-memfd kernel falls back to re-reading the
 //!   buffer on every exec.
 //! - `name`, `argv` and `envp` strings only need to live until
@@ -74,7 +74,7 @@ unsafe fn collect_cstrs(ptr: *const *const c_char) -> Option<Vec<std::ffi::OsStr
     Some(out)
 }
 
-/// Spawn the payload in a child process. Returns a handle on success, NULL
+/// Spawn the image in a child process. Returns a handle on success, NULL
 /// on failure with the negated errno in `*err_out` (when non-NULL).
 ///
 /// # Safety
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn memfd_ng_spawn(
     err_out: *mut i32,
 ) -> *mut MemFdNgChild {
     // 'static by the caller contract above: the buffer outlives the child.
-    let payload: &'static [u8] = slice::from_raw_parts(code, code_len);
+    let image: &'static [u8] = slice::from_raw_parts(code, code_len);
     let result = catch_unwind(AssertUnwindSafe(|| {
         if code.is_null() && code_len > 0 {
             return Err(-libc::EINVAL);
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn memfd_ng_spawn(
         let argv_c = collect_cstrs(argv);
         let envp_c = collect_cstrs(envp);
 
-        let mut exe = MemFdExecutable::new(&name_os, payload);
+        let mut exe = MemFdExecutable::new(&name_os, image);
         match argv_c {
             Some(v) => {
                 if let Some(first) = v.first() {
